@@ -158,7 +158,8 @@ The API validates these on boot and refuses to start if a required value is miss
 ## Running locally
 
 ```bash
-# 1. Start MongoDB (via Docker) or point DATABASE_URL at your own
+# 1. Start MongoDB. Either use a local install (DATABASE_URL=mongodb://localhost:27017/sqlpilot)
+#    or the bundled container (DATABASE_URL=mongodb://root:root@localhost:27017/sqlpilot?authSource=admin):
 docker compose up -d mongo
 
 # 2. Backend  →  http://localhost:3000/api
