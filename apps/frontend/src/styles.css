@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface-0: 255 255 255;
+  --surface-1: 249 250 251;
+  --surface-2: 243 244 246;
+  --surface-border: 229 231 235;
+  --content-strong: 17 24 39;
+  --content: 55 65 81;
+  --content-muted: 107 114 128;
+}
+
+.dark {
+  --surface-0: 10 12 16;
+  --surface-1: 17 20 26;
+  --surface-2: 24 28 36;
+  --surface-border: 39 44 54;
+  --content-strong: 243 244 246;
+  --content: 209 213 219;
+  --content-muted: 148 155 168;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+::selection {
+  background: rgb(99 102 241 / 0.25);
+}
+
+/* Thin scrollbars for data-dense panels */
+.sp-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.sp-scroll::-webkit-scrollbar-thumb {
+  background: rgb(var(--surface-border));
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+@layer components {
+  .sp-card {
+    @apply rounded-2xl border border-surface-border bg-surface-1;
+  }
+  .sp-input {
+    @apply w-full rounded-xl border border-surface-border bg-surface-0 px-3.5 py-2.5 text-sm text-content-strong
+           placeholder:text-content-muted focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30;
+  }
+  .sp-btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .sp-btn-primary {
+    @apply sp-btn bg-brand-600 text-white hover:bg-brand-500;
+  }
+  .sp-btn-ghost {
+    @apply sp-btn border border-surface-border bg-surface-0 text-content-strong hover:bg-surface-2;
+  }
+  .sp-label {
+    @apply mb-1.5 block text-sm font-medium text-content;
+  }
+}

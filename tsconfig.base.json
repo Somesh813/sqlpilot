@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "lib": ["ES2022"],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "paths": {
+      "@sqlpilot/shared": ["packages/shared/src/index.ts"],
+      "@sqlpilot/sql-parser": ["packages/sql-parser/src/index.ts"],
+      "@sqlpilot/ai": ["packages/ai/src/index.ts"],
+      "@sqlpilot/database": ["packages/database/src/index.ts"]
+    }
+  },
+  "exclude": ["node_modules", "dist"]
+}

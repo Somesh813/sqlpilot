@@ -1,0 +1,15 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": ".",
+  "testEnvironment": "node",
+  "forceExit": true,
+  "testTimeout": 30000,
+  "testRegex": ".e2e-spec.ts$",
+  "transform": { "^.+\\.(t|j)s$": ["ts-jest", { "tsconfig": "<rootDir>/../tsconfig.spec.json" }] },
+  "moduleNameMapper": {
+    "^@sqlpilot/shared$": "<rootDir>/../../../packages/shared/src/index.ts",
+    "^@sqlpilot/sql-parser$": "<rootDir>/../../../packages/sql-parser/src/index.ts",
+    "^@sqlpilot/ai$": "<rootDir>/../../../packages/ai/src/index.ts",
+    "^@sqlpilot/database$": "<rootDir>/../../../packages/database/src/index.ts"
+  }
+}

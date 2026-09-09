@@ -1,0 +1,38 @@
+{
+  "name": "sqlpilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SQLPilot — AI-powered SQL Assistant. Connect databases, ask questions in natural language, generate and safely execute SQL.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:packages": "npm run build --workspace @sqlpilot/shared && npm run build --workspace @sqlpilot/sql-parser && npm run build --workspace @sqlpilot/ai && npm run build --workspace @sqlpilot/database",
+    "build:backend": "npm run build --workspace @sqlpilot/backend",
+    "build:frontend": "npm run build --workspace @sqlpilot/frontend",
+    "build": "npm run build:packages && npm run build:backend && npm run build:frontend",
+    "dev:backend": "npm run start:dev --workspace @sqlpilot/backend",
+    "dev:frontend": "npm run start --workspace @sqlpilot/frontend",
+    "test": "npm run test --workspace @sqlpilot/shared --workspace @sqlpilot/sql-parser --workspace @sqlpilot/ai --workspace @sqlpilot/database --workspace @sqlpilot/backend --if-present",
+    "test:frontend": "npm run test --workspace @sqlpilot/frontend",
+    "test:backend": "npm run test --workspace @sqlpilot/backend",
+    "test:e2e": "npm run test:e2e --workspace @sqlpilot/backend",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "prettier --write \"**/*.{ts,js,json,md,html,scss}\"",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3",
+    "typescript": "^5.5.4"
+  },
+  "overrides": {
+    "rxjs": "7.8.1"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}
