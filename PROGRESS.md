@@ -4,8 +4,8 @@
 | --- | --- | --- |
 | 1 | Project setup + architecture (monorepo, shared packages, config, common infra, health, Docker) | ✅ Done |
 | 2 | Authentication (register, login, refresh rotation, forgot/reset, change password, roles, guards; frontend auth flow + shell + dashboard skeleton) | ✅ Done |
-| 3 | Database connection manager (CRUD, encrypted credentials, test connection, status) | ⏳ Next |
-| 4 | Schema discovery (introspection endpoints, explorer sidebar) | ◻ Planned |
+| 3 | Database connection manager (CRUD, encrypted credentials, test connection, status) | ✅ Done |
+| 4 | Schema discovery (introspection endpoints, explorer sidebar) | ⏳ Next |
 | 5 | SQL editor + query execution (Monaco, validate → policy → confirm → execute, results grid) | ◻ Planned |
 | 6 | AI SQL generation (schema context selection, structured output, conversations) | ◻ Planned |
 | 7 | AI explanation + optimization + fix-with-AI | ◻ Planned |
@@ -56,10 +56,28 @@ All green as of the last run:
 | `@sqlpilot/shared` tests | `npm test --workspace @sqlpilot/shared` | ✅ 8/8 |
 | `@sqlpilot/sql-parser` tests | `npm test --workspace @sqlpilot/sql-parser` | ✅ 19/19 |
 | Backend unit tests | `npm run test:backend` | ✅ 18/18 |
-| Backend e2e (in-memory Mongo) | `npm run test:e2e` | ✅ 8/8 (auth flow + full AppModule bootstrap) |
+| Backend e2e (in-memory Mongo) | `npm run test:e2e` | ✅ 15/15 (auth + AppModule bootstrap + connections) |
 | Frontend production build | `npm run build --workspace @sqlpilot/frontend` | ✅ |
 
-**53 tests passing.**
+**60 tests passing.**
+
+## Phase 3 — delivered
+
+- `DatabaseConnection` schema; credentials stored as one AES-256-GCM blob,
+  `select: false` so they never load into a normal query
+- `DatabaseConnectionsService`: create (tests before persisting), update
+  (re-encrypts only when credentials change, blank password = unchanged),
+  delete, ad-hoc test, re-test stored + persist status, `resolveDriverConfig`
+  for later phases; per-user scoping on every query
+- `DatabaseConnectionsController`: `GET/POST /databases`, `POST /databases/test`,
+  `GET/PATCH/DELETE /databases/:id`, `POST /databases/:id/test`
+- Audit events for create/update/delete/test
+- Frontend: `ConnectionsService` (signal store), `connections.component`
+  (card grid, status badges, empty state), `connection-form` modal with
+  engine-conditional fields, live "Test connection", inline errors
+- 7 e2e tests: auth required, ad-hoc test (ok + failure), create hides
+  credentials (SQLite + Postgres), missing-host rejection, list/retest/delete,
+  cross-user isolation
 
 ## How to verify a phase
 
