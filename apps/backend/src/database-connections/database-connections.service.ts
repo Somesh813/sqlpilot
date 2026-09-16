@@ -223,6 +223,18 @@ export class DatabaseConnectionsService {
     await this.model.updateOne({ _id: id }, { status, lastError: error }).exec();
   }
 
+  async touchSchemaRefreshed(id: string, at: Date): Promise<void> {
+    await this.model.updateOne({ _id: id }, { schemaRefreshedAt: at }).exec();
+  }
+
+  /** ADMIN-only. Enables/disables non-SELECT statements for this connection. */
+  async setWritePolicy(userId: string, id: string, enabled: boolean): Promise<SafeDatabaseConnection> {
+    const doc = await this.getDoc(userId, id);
+    doc.writeEnabled = enabled;
+    await doc.save();
+    return this.toDto(doc);
+  }
+
   // ---------------------------------------------------------------------------
 
   private async runTest(config: DriverConfig): Promise<TestConnectionResult> {

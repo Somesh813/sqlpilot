@@ -5,15 +5,15 @@
 | 1 | Project setup + architecture (monorepo, shared packages, config, common infra, health, Docker) | ✅ Done |
 | 2 | Authentication (register, login, refresh rotation, forgot/reset, change password, roles, guards; frontend auth flow + shell + dashboard skeleton) | ✅ Done |
 | 3 | Database connection manager (CRUD, encrypted credentials, test connection, status) | ✅ Done |
-| 4 | Schema discovery (introspection endpoints, explorer sidebar) | ⏳ Next |
-| 5 | SQL editor + query execution (Monaco, validate → policy → confirm → execute, results grid) | ◻ Planned |
-| 6 | AI SQL generation (schema context selection, structured output, conversations) | ◻ Planned |
-| 7 | AI explanation + optimization + fix-with-AI | ◻ Planned |
-| 8 | Query history + saved queries + reusable prompts | ◻ Planned |
-| 9 | Charts + analytics dashboard | ◻ Planned |
-| 10 | Security hardening pass (rate limits, audit coverage, red-team the parser) | ◻ Planned |
-| 11 | Testing (unit + integration across modules) | ◻ Planned |
-| 12 | Docker + production configuration polish | ◻ Planned |
+| 4 | Schema discovery (introspection endpoints, explorer sidebar) | ✅ Done |
+| 5 | SQL editor + query execution (validate → policy → confirm → execute, results grid) | ✅ Done |
+| 6 | AI SQL generation (schema context selection, structured output, conversations) | ✅ Done |
+| 7 | AI explanation + optimization + fix-with-AI | ✅ Done |
+| 8 | Query history + saved queries + reusable prompts | ✅ Done |
+| 9 | Charts + analytics dashboard | ✅ Done |
+| 10 | Security hardening pass (rate limits, audit coverage, red-team the parser) | ✅ Done |
+| 11 | Testing (unit + integration across modules) | ✅ Done |
+| 12 | Docker + production configuration polish | ⏳ In progress |
 
 ## Phase 1 — delivered
 
@@ -78,6 +78,63 @@ All green as of the last run:
 - 7 e2e tests: auth required, ad-hoc test (ok + failure), create hides
   credentials (SQLite + Postgres), missing-host rejection, list/retest/delete,
   cross-user isolation
+
+## Phases 4–9 — delivered
+
+**Schema (4):** `SchemaSnapshot` cache in Mongo; `GET/POST /databases/:id/schema[/refresh]`;
+`SchemaService.buildContext()` keyword-scores tables/columns against the question, pulls in
+directly related tables via FKs, caps at `AI_MAX_SCHEMA_TABLES`, and reports the rest as
+`omittedTables` — this is what keeps large schemas out of the AI prompt. Frontend schema
+explorer (expandable tables, PK/FK badges, "Query"/"Ask AI" per table).
+
+**SQL editor + execution (5):** Lightweight dependency-free `sp-sql-editor` (line-number
+gutter, Ctrl/Cmd+Enter, soft tabs) instead of Monaco — keeps the bundle small and the build
+free of worker/CSP issues; a basic SQL pretty-printer (`formatSql`) covers Format. Every
+execution goes through `QueryExecutionService`: `validateSql` → policy → `confirmed: true`
+required → driver execution with timeout/row cap/pagination → `QueryHistory` record → audit.
+Blocked queries and DB errors are both recorded to history. `sp-results-grid`: client sort/
+filter, cell copy, CSV/JSON export, server pagination.
+
+**AI generation (6) + explain/optimize/fix (7):** `AiModule` binds an `AI_PROVIDER` — the real
+`OpenAiProvider` when `OPENAI_API_KEY` is set, otherwise a `DisabledAiProvider` that fails
+every call with a clear 503 instead of crashing. `AiSqlService.generate()` re-validates the
+model's SQL through the same `@sqlpilot/sql-parser` policy before it ever reaches the editor
+— a model that ignores instructions still can't produce an executable DROP/INSERT. Chat turns
+persist to `Conversation`/`ConversationMessage`; `recentTurns()` sends only the last 8 turns as
+context (not the schema on every message). Frontend workspace page: chat pane + editor +
+Format/Validate/Explain/Explain(tech)/Optimize/Save/Run, inline validation verdict, error
+panel with "Fix with AI", explain/optimize side panel.
+
+**History + saved queries (8):** `QueryHistoryService` (paginated, search, status/connection
+filters); `SavedQueriesService` + `PromptTemplate` CRUD. Functional history and saved-queries
+pages (search, status filter, pagination, run/duplicate/delete) replacing the earlier
+placeholders.
+
+**Charts + analytics (9):** `AnalyticsService.getDashboard()` aggregates connections/history/
+saved-queries per user (Mongo aggregation for status breakdown + avg execution time).
+`sp-chart` (ECharts): bar/line/area/pie/scatter, theme-aware, auto x/y field inference from
+the AI's `visualization` recommendation or column types. Dashboard now shows live stats.
+
+## Phase 10 — security hardening delivered
+
+- **Admin-gated write mode**: `PATCH /databases/:id/write-policy` (ADMIN role only, enforced
+  by the global `RolesGuard`) toggles `connection.writeEnabled`; execution still requires the
+  global `ALLOW_WRITE_QUERIES` flag on top. Frontend shows the toggle only to admins.
+- AI-generated SQL is policy-checked again server-side (see above) — the model is never trusted.
+- Request body size capped at 1MB (`express.json({ limit: '1mb' })`).
+- Per-route throttling tighter than the global default on `/auth/*` (20/min) and `/ai/*` (20/min).
+- Audit log covers connection CRUD/test, schema refresh, AI generation, query
+  execute/blocked, login/login-failed/password-changed; `GET /audit` is ADMIN-only.
+- Cross-user isolation verified by tests on every resource (connections, schema, history,
+  saved queries, conversations).
+
+## Phase 11 — testing delivered
+
+93 tests passing: 8 (`shared`) + 19 (`sql-parser`) + 28 backend unit (auth, tokens, encryption,
+query-execution write-policy matrix, schema relevance scoring) + 38 backend e2e across 7 spec
+files (auth, app bootstrap, database-connections, schema discovery, query execution incl. the
+full USER-blocked/ADMIN-enables/INSERT-succeeds flow, saved queries/prompts/conversations/
+analytics, AI-disabled-provider behavior).
 
 ## How to verify a phase
 

@@ -6,16 +6,23 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import configuration from './config/configuration';
 import { validateEnv } from './config/env.validation';
+import { AiModule } from './ai/ai.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { CommonModule } from './common/common.module';
+import { ConversationsModule } from './conversations/conversations.module';
 import { DatabaseConnectionsModule } from './database-connections/database-connections.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { RolesGuard } from './common/guards/roles.guard';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { HealthModule } from './health/health.module';
+import { QueryExecutionModule } from './query-execution/query-execution.module';
+import { QueryHistoryModule } from './query-history/query-history.module';
+import { SavedQueriesModule } from './saved-queries/saved-queries.module';
+import { SchemaModule } from './schema/schema.module';
 import { UsersModule } from './users/users.module';
 
 @Module({
@@ -54,6 +61,13 @@ import { UsersModule } from './users/users.module';
     AuthModule,
     UsersModule,
     DatabaseConnectionsModule,
+    SchemaModule,
+    QueryHistoryModule,
+    QueryExecutionModule,
+    ConversationsModule,
+    AiModule,
+    SavedQueriesModule,
+    AnalyticsModule,
     HealthModule,
   ],
   providers: [

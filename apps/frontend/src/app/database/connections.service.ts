@@ -36,6 +36,12 @@ export class ConnectionsService {
       .pipe(tap((updated) => this.connections.update((list) => list.map((c) => (c.id === id ? updated : c)))));
   }
 
+  setWritePolicy(id: string, enabled: boolean): Observable<SafeDatabaseConnection> {
+    return this.api
+      .patch<SafeDatabaseConnection>(`/databases/${id}/write-policy`, { enabled })
+      .pipe(tap((updated) => this.connections.update((list) => list.map((c) => (c.id === id ? updated : c)))));
+  }
+
   remove(id: string): Observable<void> {
     return this.api
       .delete<void>(`/databases/${id}`)

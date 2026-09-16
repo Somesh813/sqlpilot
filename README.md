@@ -4,8 +4,10 @@
 schema-aware SQL that is validated, explained, and safely executed — with results, charts,
 history, and optimization suggestions in one workspace.
 
-> Status: **Phase 1–2 complete** (project architecture + authentication). See
-> [`PROGRESS.md`](./PROGRESS.md) for the phase-by-phase roadmap.
+> Status: **Phases 1–11 complete** (architecture, auth, connections, schema discovery, SQL
+> editor/execution, AI generation/explain/optimize/fix, history, saved queries, charts,
+> security hardening, tests). 93 tests passing. Phase 12 (production Docker polish) is in
+> progress. See [`PROGRESS.md`](./PROGRESS.md) for the phase-by-phase detail.
 
 ---
 
@@ -46,14 +48,15 @@ with export and charting, and the AI can explain, optimize, or repair any query.
 | Auth | Register, login, logout, refresh-token rotation with reuse detection, forgot/reset password, change password, `USER` / `ADMIN` roles |
 | Connections | Add / test / edit / delete PostgreSQL, MySQL, SQLite connections; encrypted credentials; connection status |
 | Schema | Automatic discovery of tables, columns, types, keys, indexes, relationships |
-| AI Assistant | Natural-language → SQL, structured JSON output, assumptions, confidence, warnings, conversation context |
-| SQL editor | Monaco editor with formatting, generate / explain / optimize / run |
+| AI Assistant | Natural-language → SQL, structured JSON output, assumptions, confidence, warnings, conversation context (only relevant tables sent, not the whole schema) |
+| SQL editor | Line-numbered editor with formatting, generate / validate / explain / optimize / run, Ctrl+Enter to run |
 | Execution | SQL parse → validation → security policy → user confirmation → execution; timeout, row limits, pagination |
-| Results | Sortable / filterable grid, column controls, CSV / JSON / Excel export |
-| Visualization | AI-recommended bar / line / pie / area / scatter / KPI charts |
-| Explain / Optimize / Fix | Simple + technical explanations, advisory optimization, error-driven repair |
-| History & saved queries | Searchable history, favorites with tags |
-| Observability | Structured logging, request IDs, health endpoint, audit log |
+| Results | Sortable / filterable grid, cell copy, CSV / JSON export, server-side pagination |
+| Visualization | AI-recommended bar / line / area / pie / scatter charts (ECharts), theme-aware |
+| Explain / Optimize / Fix | Simple + technical explanations, advisory optimization, error-driven repair ("Fix with AI") |
+| History & saved queries | Searchable/filterable history, favorites with tags, reusable prompt templates |
+| Admin write policy | Per-connection write toggle (ADMIN-only) gated by a global kill switch |
+| Observability | Structured logging, request IDs, health endpoint, audit log (ADMIN-viewable) |
 
 ## Architecture
 
@@ -87,7 +90,7 @@ AI generation → SQL parser → SQL validation → security policy → user con
 
 ## Tech stack
 
-- **Frontend:** Angular 18 (standalone + signals), TypeScript, RxJS, Tailwind CSS, Angular CDK/Material, Monaco Editor, ECharts
+- **Frontend:** Angular 18 (standalone + signals), TypeScript, RxJS, Tailwind CSS, ECharts, a small dependency-free SQL editor component
 - **Backend:** Node.js 20, NestJS 10, REST, Mongoose, Passport JWT, `class-validator`, Helmet, pino
 - **AI:** OpenAI API with JSON-schema structured outputs and prompt templates
 - **Databases:** MongoDB (application data); PostgreSQL / MySQL / SQLite (external, user-connected)
@@ -159,7 +162,7 @@ The API validates these on boot and refuses to start if a required value is miss
 
 ```bash
 # 1. Start MongoDB. Either use a local install (DATABASE_URL=mongodb://localhost:27017/sqlpilot)
-#    or the bundled container (DATABASE_URL=mongodb://root:root@localhost:27017/sqlpilot?authSource=admin):
+#    or the bundled container (DATABASE_URL=mongodb://sqlpilot:sqlpilot@localhost:27017/sqlpilot?authSource=sqlpilot):
 docker compose up -d mongo
 
 # 2. Backend  →  http://localhost:3000/api
@@ -198,11 +201,48 @@ Base path: `/api`. All routes require a `Bearer` access token except the ones ma
 | POST | `/auth/change-password` | | Change password, revokes sessions |
 | GET | `/health` | ✅ | Liveness + Mongo + memory checks |
 
-### Planned (later phases)
+### Databases & schema
 
-`/databases`, `/databases/:id/test`, `/databases/:id/schema`, `/ai/generate-sql`,
-`/ai/explain-sql`, `/ai/optimize-sql`, `/ai/fix-sql`, `/queries/validate`, `/queries/execute`,
-`/queries/history`, `/queries/saved`, `/conversations`, `/analytics/dashboard`.
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET / POST | `/databases` | List / create a connection |
+| POST | `/databases/test` | Test connection params before saving |
+| GET / PATCH / DELETE | `/databases/:id` | Manage one connection |
+| POST | `/databases/:id/test` | Re-test a stored connection |
+| PATCH | `/databases/:id/write-policy` | **ADMIN only** — enable/disable write statements |
+| GET | `/databases/:id/schema` | Cached schema snapshot (discovers on first read) |
+| POST | `/databases/:id/schema/refresh` | Force re-discovery |
+
+### Queries
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/queries/validate` | Run the security policy without executing |
+| POST | `/queries/execute` | Validate → policy → `confirmed:true` required → execute |
+| GET | `/queries/history` | Paginated, filterable by connection/status/search |
+| DELETE | `/queries/history/:id` | Remove one entry |
+| POST | `/queries/save` · GET `/queries/saved` · PATCH/DELETE `/queries/saved/:id` | Saved queries |
+| GET/POST `/prompts` · DELETE `/prompts/:id` | Reusable prompt templates |
+
+### AI
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/ai/generate-sql` | NL → structured SQL; appends to the conversation if `conversationId` is given |
+| POST | `/ai/explain-sql` | `mode: "simple" \| "technical"` |
+| POST | `/ai/optimize-sql` | Advisory optimization with a disclaimer, never a guarantee |
+| POST | `/ai/fix-sql` | Given the failing SQL + database error, returns a corrected query |
+
+Every AI endpoint returns **503** with a clear message (never a crash) when `OPENAI_API_KEY`
+is unset. AI-generated SQL is re-validated by `@sqlpilot/sql-parser` before it's ever returned.
+
+### Conversations & analytics
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET/POST `/conversations` · GET/DELETE `/conversations/:id` | AI chat sessions |
+| GET | `/analytics/dashboard` | Per-user stats for the dashboard |
+| GET | `/audit` | **ADMIN only** — audit log |
 
 ## Security model
 
@@ -227,11 +267,14 @@ See [`docs/security.md`](./docs/security.md) for details.
 ## AI architecture
 
 The `@sqlpilot/ai` package isolates all model interaction behind an `AiProvider` interface
-(`OpenAiProvider` is the implementation). Feature services compose prompt templates
-(`buildSqlGenerationMessages`, `buildSqlExplanationMessages`, …) and request **structured
-JSON** validated against Zod schemas — no free-text parsing. The backend `SchemaContextService`
-(Phase 6) selects only the tables relevant to a question so large schemas do not blow the
-context window.
+(`OpenAiProvider` is the implementation; a `DisabledAiProvider` is bound instead when
+`OPENAI_API_KEY` is unset, so the API still boots and every AI route answers 503 rather than
+crashing). Feature services compose prompt templates (`buildSqlGenerationMessages`,
+`buildSqlExplanationMessages`, …) and request **structured JSON** validated against Zod
+schemas — no free-text parsing. `SchemaService.buildContext()` keyword-scores tables/columns
+against the question, pulls in directly related tables via foreign keys, and caps the result
+at `AI_MAX_SCHEMA_TABLES` so large schemas never blow the context window. Every model-generated
+query is re-validated by `@sqlpilot/sql-parser` before it is returned to the client.
 
 ## Database support
 

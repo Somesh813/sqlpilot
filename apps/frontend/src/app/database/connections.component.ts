@@ -1,5 +1,6 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import type { SafeDatabaseConnection } from '@sqlpilot/shared';
+import { AuthService } from '../core/services/auth.service';
 import { ToastService } from '../core/services/toast.service';
 import { EmptyStateComponent } from '../shared/ui/empty-state.component';
 import { PageComponent } from '../shared/ui/page.component';
@@ -49,6 +50,18 @@ import { ConnectionsService } from './connections.service';
                 <p class="line-clamp-2 text-xs text-red-500">{{ c.lastError }}</p>
               }
 
+              @if (auth.isAdmin()) {
+                <label class="flex items-center gap-2 text-xs text-content-muted">
+                  <input
+                    type="checkbox"
+                    class="rounded border-surface-border"
+                    [checked]="c.writeEnabled"
+                    (change)="toggleWrite(c, $any($event.target).checked)"
+                  />
+                  Allow write queries (INSERT/UPDATE/DELETE)
+                </label>
+              }
+
               <div class="mt-auto flex flex-wrap gap-2 pt-1">
                 <button class="sp-btn-ghost px-2.5 py-1 text-xs" (click)="test(c)" [disabled]="busyId() === c.id">
                   {{ busyId() === c.id ? 'Testing…' : 'Test' }}
@@ -75,6 +88,7 @@ import { ConnectionsService } from './connections.service';
 })
 export class ConnectionsComponent implements OnInit {
   readonly connections = inject(ConnectionsService);
+  readonly auth = inject(AuthService);
   private readonly toast = inject(ToastService);
 
   readonly formOpen = signal(false);
@@ -108,6 +122,15 @@ export class ConnectionsComponent implements OnInit {
         r.ok ? this.toast.success(`${c.name}: connected in ${r.latencyMs} ms`) : this.toast.error(`${c.name}: ${r.error}`);
       },
       error: () => this.busyId.set(null),
+    });
+  }
+
+  toggleWrite(c: SafeDatabaseConnection, enabled: boolean): void {
+    this.connections.setWritePolicy(c.id, enabled).subscribe({
+      next: () =>
+        this.toast[enabled ? 'success' : 'info'](
+          enabled ? `Write queries enabled for ${c.name}.` : `Write queries disabled for ${c.name}.`,
+        ),
     });
   }
 

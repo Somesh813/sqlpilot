@@ -9,10 +9,17 @@ import {
   Post,
   Req,
 } from '@nestjs/common';
-import { SafeDatabaseConnection, TestConnectionResult } from '@sqlpilot/shared';
+import { IsBoolean } from 'class-validator';
+import { SafeDatabaseConnection, TestConnectionResult, UserRole } from '@sqlpilot/shared';
 import { Request } from 'express';
 import { AuthenticatedUser, CurrentUser } from '../common/decorators/current-user.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
 import { DatabaseConnectionsService } from './database-connections.service';
+
+class SetWritePolicyDto {
+  @IsBoolean()
+  enabled!: boolean;
+}
 import {
   CreateConnectionDto,
   TestConnectionDto,
@@ -74,6 +81,17 @@ export class DatabaseConnectionsController {
     @Req() req: Request,
   ): Promise<TestConnectionResult> {
     return this.connections.testExisting(user.id, id, ctx(req));
+  }
+
+  /** ADMIN-only. Also requires the global ALLOW_WRITE_QUERIES flag at execution time. */
+  @Patch(':id/write-policy')
+  @Roles(UserRole.ADMIN)
+  setWritePolicy(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: SetWritePolicyDto,
+  ): Promise<SafeDatabaseConnection> {
+    return this.connections.setWritePolicy(user.id, id, dto.enabled);
   }
 
   @Delete(':id')

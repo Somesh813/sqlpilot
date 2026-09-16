@@ -34,7 +34,7 @@ export const routes: Routes = [
       },
       {
         path: 'assistant',
-        loadComponent: () => import('./assistant/assistant.component').then((m) => m.AssistantComponent),
+        loadComponent: () => import('./workspace/workspace.component').then((m) => m.WorkspaceComponent),
       },
       {
         path: 'history',

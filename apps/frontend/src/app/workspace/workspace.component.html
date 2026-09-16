@@ -1,0 +1,231 @@
+<div class="flex h-full flex-col">
+  <!-- top bar -->
+  <div class="flex items-center gap-3 border-b border-surface-border bg-surface-0 px-4 py-2">
+    <button
+      class="grid h-8 w-8 place-items-center rounded-lg border border-surface-border text-content hover:bg-surface-2"
+      (click)="sidebarOpen.set(!sidebarOpen())"
+      title="Toggle schema"
+    >
+      ☰
+    </button>
+    <select
+      class="sp-input max-w-xs py-1.5 text-sm"
+      [ngModel]="connectionId()"
+      (ngModelChange)="selectConnection($event)"
+    >
+      <option value="" disabled>Select a connection…</option>
+      @for (c of connections.connections(); track c.id) {
+        <option [value]="c.id">{{ c.name }} ({{ c.type }})</option>
+      }
+    </select>
+    @if (connections.loaded() && connections.connections().length === 0) {
+      <a routerLink="/connections" class="text-sm text-brand-500">Add a connection →</a>
+    }
+    <span class="ml-auto text-xs text-content-muted">
+      {{ schema.current()?.tables?.length ?? 0 }} tables
+    </span>
+  </div>
+
+  <div class="flex min-h-0 flex-1">
+    <!-- schema explorer -->
+    @if (sidebarOpen()) {
+      <aside class="hidden w-72 shrink-0 border-r border-surface-border bg-surface-1 lg:block">
+        <sp-schema-explorer
+          (refresh)="refreshSchema()"
+          (selectTable)="useTable($event)"
+          (askAbout)="askAboutTable($event)"
+        />
+      </aside>
+    }
+
+    <!-- main -->
+    <div class="flex min-w-0 flex-1 flex-col">
+      @if (!hasConnection()) {
+        <div class="grid flex-1 place-items-center p-8 text-center">
+          <div>
+            <p class="text-sm font-medium text-content-strong">No database selected</p>
+            <p class="mt-1 text-sm text-content-muted">
+              @if (connections.connections().length === 0) {
+                Connect a database to start asking questions.
+              } @else {
+                Pick a connection above.
+              }
+            </p>
+            @if (connections.connections().length === 0) {
+              <a routerLink="/connections" class="sp-btn-primary mt-4 inline-flex">Connect Database</a>
+            }
+          </div>
+        </div>
+      } @else {
+        <!-- assistant -->
+        <section class="flex min-h-0 flex-[1.1] flex-col border-b border-surface-border">
+          <div class="sp-scroll min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+            @if (chat().length === 0) {
+              <div class="mx-auto max-w-md pt-6 text-center">
+                <p class="text-sm font-medium text-content-strong">Ask SQLPilot</p>
+                <p class="mt-1 text-xs text-content-muted">
+                  "Show monthly revenue" · "Top 10 customers by spend" · "Failed payments this week"
+                </p>
+              </div>
+            }
+            @for (m of chat(); track $index) {
+              <div class="flex" [class.justify-end]="m.role === 'user'">
+                <div
+                  class="max-w-[85%] rounded-2xl px-3.5 py-2 text-sm"
+                  [class]="m.role === 'user' ? 'bg-brand-600 text-white' : 'sp-card'"
+                >
+                  <p class="whitespace-pre-wrap">{{ m.text }}</p>
+                  @if (m.generated && m.generated.sql) {
+                    <div class="mt-2 space-y-1 border-t border-white/20 pt-2 text-xs">
+                      @if (m.generated.assumptions.length) {
+                        <p class="opacity-80">Assumptions: {{ m.generated.assumptions.join('; ') }}</p>
+                      }
+                      <p class="opacity-80">
+                        Tables: {{ m.generated.tablesUsed.join(', ') }} · confidence
+                        {{ (m.generated.confidence * 100).toFixed(0) }}%
+                      </p>
+                      @for (w of m.generated.warnings; track w) {
+                        <p class="text-amber-300">⚠ {{ w }}</p>
+                      }
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+            @if (thinking()) {
+              <div class="flex"><div class="sp-card px-3.5 py-2 text-sm text-content-muted">Thinking…</div></div>
+            }
+          </div>
+          <div class="border-t border-surface-border p-3">
+            <div class="flex gap-2">
+              <input
+                class="sp-input"
+                placeholder="Ask anything about your data…"
+                [ngModel]="question()"
+                (ngModelChange)="question.set($event)"
+                (keyup.enter)="ask()"
+              />
+              <button class="sp-btn-primary shrink-0" [disabled]="thinking()" (click)="ask()">Ask</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- editor -->
+        <section class="flex min-h-0 flex-1 flex-col">
+          <div class="flex flex-wrap items-center gap-2 border-b border-surface-border px-3 py-2 text-xs">
+            <button class="sp-btn-ghost px-2.5 py-1" (click)="format()">Format</button>
+            <button class="sp-btn-ghost px-2.5 py-1" (click)="validate()">Validate</button>
+            <button class="sp-btn-ghost px-2.5 py-1" (click)="explain('simple')">Explain</button>
+            <button class="sp-btn-ghost px-2.5 py-1" (click)="explain('technical')">Explain (tech)</button>
+            <button class="sp-btn-ghost px-2.5 py-1" (click)="optimize()">Optimize</button>
+            <button class="sp-btn-ghost px-2.5 py-1" (click)="saveQuery()">Save</button>
+            <button class="sp-btn-primary ml-auto px-3 py-1" [disabled]="running() || !canRun()" (click)="run()">
+              {{ running() ? 'Running…' : 'Run ▸' }}
+            </button>
+          </div>
+
+          @if (validation(); as v) {
+            <div
+              class="border-b border-surface-border px-3 py-1.5 text-xs"
+              [class]="v.valid ? 'text-emerald-500' : 'text-red-500'"
+            >
+              {{ v.valid ? 'Safe · ' + v.statementKind + ' · risk ' + v.risk : v.violations[0].message }}
+              @if (v.valid && v.hasLimit) { · LIMIT enforced }
+            </div>
+          }
+
+          <div class="min-h-0 flex-1 p-3">
+            <sp-sql-editor [value]="sql()" (valueChange)="sql.set($event)" (run)="run()" />
+          </div>
+
+          @if (panel() !== 'none') {
+            <div class="sp-scroll max-h-56 overflow-y-auto border-t border-surface-border bg-surface-1 p-3 text-xs">
+              <div class="mb-1 flex items-center justify-between">
+                <span class="font-medium text-content-strong">
+                  {{ panel() === 'explain' ? 'Explanation' : 'Optimization' }}
+                </span>
+                <button class="text-content-muted hover:text-content-strong" (click)="panel.set('none')">✕</button>
+              </div>
+              @if (panel() === 'explain') {
+                @if (explanation(); as x) {
+                  <p class="text-content">{{ x.summary }}</p>
+                  @if (x.joins.length) { <p class="mt-1 text-content-muted">Joins: {{ x.joins.join('; ') }}</p> }
+                  @if (x.filters.length) { <p class="text-content-muted">Filters: {{ x.filters.join('; ') }}</p> }
+                  @if (x.performanceNotes.length) {
+                    <p class="mt-1 text-amber-500">Performance: {{ x.performanceNotes.join('; ') }}</p>
+                  }
+                } @else {
+                  <p class="text-content-muted">Analyzing…</p>
+                }
+              } @else {
+                @if (optimization(); as o) {
+                  <pre class="whitespace-pre-wrap rounded-lg bg-surface-0 p-2 font-mono">{{ o.optimizedSql }}</pre>
+                  <ul class="mt-2 list-disc pl-4 text-content">
+                    @for (c of o.changes; track c) { <li>{{ c }}</li> }
+                  </ul>
+                  <p class="mt-2 text-content-muted">{{ o.disclaimer }}</p>
+                  <button class="sp-btn-primary mt-2 px-3 py-1" (click)="applyOptimized()">Apply</button>
+                } @else {
+                  <p class="text-content-muted">Analyzing…</p>
+                }
+              }
+            </div>
+          }
+
+          <!-- results -->
+          <div class="flex h-72 shrink-0 flex-col border-t border-surface-border">
+            @if (execError(); as err) {
+              <div class="sp-scroll flex-1 overflow-y-auto p-4 text-sm">
+                <p class="font-medium text-red-500">Query failed</p>
+                <p class="mt-1 text-content">{{ err.message }}</p>
+                @if (err.databaseError) {
+                  <pre class="mt-2 whitespace-pre-wrap rounded-lg bg-surface-1 p-2 font-mono text-xs text-content-muted">{{ err.databaseError }}</pre>
+                  <button class="sp-btn-primary mt-3 px-3 py-1.5" [disabled]="thinking()" (click)="fixWithAi()">
+                    Fix with AI
+                  </button>
+                }
+              </div>
+            } @else {
+            @if (result(); as r) {
+              <div class="flex items-center gap-2 border-b border-surface-border px-3 py-1.5 text-xs">
+                <button
+                  class="rounded-lg px-2 py-1"
+                  [class]="resultTab() === 'table' ? 'bg-surface-2 text-content-strong' : 'text-content-muted'"
+                  (click)="resultTab.set('table')"
+                >
+                  Table
+                </button>
+                <button
+                  class="rounded-lg px-2 py-1"
+                  [class]="resultTab() === 'chart' ? 'bg-surface-2 text-content-strong' : 'text-content-muted'"
+                  (click)="resultTab.set('chart')"
+                >
+                  Chart
+                </button>
+                @if (resultTab() === 'chart') {
+                  <select class="sp-input ml-2 w-32 py-1 text-xs" [ngModel]="vizType()" (ngModelChange)="vizType.set($event)">
+                    @for (v of vizOptions; track v) { <option [value]="v">{{ v }}</option> }
+                  </select>
+                }
+              </div>
+              <div class="min-h-0 flex-1">
+                @if (resultTab() === 'table') {
+                  <sp-results-grid [result]="r" (pageChange)="run($event)" />
+                } @else {
+                  <div class="h-full p-3">
+                    <sp-chart [result]="r" [type]="vizType()" />
+                  </div>
+                }
+              </div>
+            } @else {
+              <p class="grid flex-1 place-items-center text-xs text-content-muted">
+                Run a query to see results.
+              </p>
+            }
+            }
+          </div>
+        </section>
+      }
+    </div>
+  </div>
+</div>

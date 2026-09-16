@@ -24,7 +24,6 @@
     "@angular/router": "^18.2.0",
     "@sqlpilot/shared": "0.1.0",
     "echarts": "^5.5.1",
-    "monaco-editor": "^0.52.0",
     "rxjs": "^7.8.1",
     "tslib": "^2.7.0",
     "zone.js": "~0.14.10"
