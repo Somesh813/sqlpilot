@@ -31,8 +31,13 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
   if (encryptionKey && !/^[0-9a-fA-F]{64}$/.test(encryptionKey)) {
     errors.push('ENCRYPTION_KEY must be 64 hex characters (32 bytes)');
   }
-  if (isProd && !config.OPENAI_API_KEY) {
-    errors.push('OPENAI_API_KEY is required in production');
+  const aiProvider = String(config.AI_PROVIDER ?? 'openai');
+  if (isProd) {
+    if (aiProvider === 'groq' && !config.GROQ_API_KEY) {
+      errors.push('GROQ_API_KEY is required in production when AI_PROVIDER=groq');
+    } else if (aiProvider !== 'groq' && !config.OPENAI_API_KEY) {
+      errors.push('OPENAI_API_KEY is required in production (or set AI_PROVIDER=groq with GROQ_API_KEY)');
+    }
   }
 
   if (errors.length > 0) {

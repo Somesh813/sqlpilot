@@ -92,7 +92,7 @@ AI generation → SQL parser → SQL validation → security policy → user con
 
 - **Frontend:** Angular 18 (standalone + signals), TypeScript, RxJS, Tailwind CSS, ECharts, a small dependency-free SQL editor component
 - **Backend:** Node.js 20, NestJS 10, REST, Mongoose, Passport JWT, `class-validator`, Helmet, pino
-- **AI:** OpenAI API with JSON-schema structured outputs and prompt templates
+- **AI:** OpenAI **or Groq** (switch with `AI_PROVIDER`) with JSON-schema structured outputs and prompt templates
 - **Databases:** MongoDB (application data); PostgreSQL / MySQL / SQLite (external, user-connected)
 - **Infra:** Docker + Docker Compose
 - **Testing:** Jest, Supertest, `mongodb-memory-server`, Karma/Jasmine
@@ -107,7 +107,7 @@ sqlpilot/
 ├── packages/
 │   ├── shared/         Types, enums, DTO contracts, constants shared front↔back
 │   ├── sql-parser/     SQL AST parsing + security validation (unit-tested)
-│   ├── ai/             OpenAI provider abstraction + prompt templates + output schemas
+│   ├── ai/             OpenAI/Groq provider abstraction + prompt templates + output schemas
 │   └── database/       Postgres/MySQL/SQLite drivers + schema introspection
 ├── docker/             Dockerfiles, nginx config, mongo init
 ├── docs/               Architecture and security notes
@@ -150,7 +150,11 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | `JWT_ACCESS_EXPIRES_IN` | – | e.g. `15m` |
 | `JWT_REFRESH_EXPIRES_IN` | – | e.g. `7d` |
 | `ENCRYPTION_KEY` | ✅ | 64 hex chars — AES-256-GCM key for stored DB credentials |
-| `OPENAI_API_KEY` | prod | OpenAI key (required in production) |
+| `AI_PROVIDER` | – | `openai` (default) or `groq` |
+| `OPENAI_API_KEY` | prod* | OpenAI key (required in production when `AI_PROVIDER=openai`) |
+| `GROQ_API_KEY` | prod* | Groq key (required in production when `AI_PROVIDER=groq`) |
+| `GROQ_MODEL` / `GROQ_MODEL_FAST` | – | Default `openai/gpt-oss-120b` / `openai/gpt-oss-20b` |
+| `AI_STRUCTURED_OUTPUT_MODE` | – | `json_schema` (default) or `json_object` for models without strict-schema support |
 | `OPENAI_MODEL` / `OPENAI_MODEL_FAST` | – | Model ids |
 | `QUERY_TIMEOUT_MS` | – | Per-query timeout (default `15000`) |
 | `QUERY_MAX_ROWS` | – | Max rows returned (default `1000`) |
@@ -175,7 +179,7 @@ npm run dev:frontend
 ## Docker
 
 ```bash
-cp .env.example .env    # fill in JWT_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY, OPENAI_API_KEY
+cp .env.example .env    # fill in JWT_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY, and OPENAI_API_KEY or GROQ_API_KEY (+ AI_PROVIDER=groq)
 docker compose up --build
 ```
 
@@ -233,8 +237,8 @@ Base path: `/api`. All routes require a `Bearer` access token except the ones ma
 | POST | `/ai/optimize-sql` | Advisory optimization with a disclaimer, never a guarantee |
 | POST | `/ai/fix-sql` | Given the failing SQL + database error, returns a corrected query |
 
-Every AI endpoint returns **503** with a clear message (never a crash) when `OPENAI_API_KEY`
-is unset. AI-generated SQL is re-validated by `@sqlpilot/sql-parser` before it's ever returned.
+Every AI endpoint returns **503** with a clear message (never a crash) when the selected provider's key
+(`OPENAI_API_KEY` / `GROQ_API_KEY`) is unset. AI-generated SQL is re-validated by `@sqlpilot/sql-parser` before it's ever returned.
 
 ### Conversations & analytics
 
@@ -267,9 +271,10 @@ See [`docs/security.md`](./docs/security.md) for details.
 ## AI architecture
 
 The `@sqlpilot/ai` package isolates all model interaction behind an `AiProvider` interface
-(`OpenAiProvider` is the implementation; a `DisabledAiProvider` is bound instead when
-`OPENAI_API_KEY` is unset, so the API still boots and every AI route answers 503 rather than
-crashing). Feature services compose prompt templates (`buildSqlGenerationMessages`,
+(`OpenAiProvider` is the implementation; Groq exposes an OpenAI-compatible API, so
+`AI_PROVIDER=groq` reuses the same client pointed at `https://api.groq.com/openai/v1`. A
+`DisabledAiProvider` is bound instead when the selected provider's key is unset, so the API
+still boots and every AI route answers 503 rather than crashing). Feature services compose prompt templates (`buildSqlGenerationMessages`,
 `buildSqlExplanationMessages`, …) and request **structured JSON** validated against Zod
 schemas — no free-text parsing. `SchemaService.buildContext()` keyword-scores tables/columns
 against the question, pulls in directly related tables via foreign keys, and caps the result

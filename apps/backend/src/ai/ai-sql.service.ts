@@ -47,7 +47,7 @@ export class AiSqlService {
     ctx: { requestId?: string | null; ip?: string | null },
   ): Promise<GeneratedSql> {
     const connection = await this.connections.get(userId, connectionId);
-    const maxTables = this.config.get<number>('openai.maxSchemaTables') ?? 25;
+    const maxTables = this.config.get<number>('ai.maxSchemaTables') ?? 25;
     const schemaContext = await this.schema.buildContext(userId, connectionId, question, maxTables);
 
     const messages = buildSqlGenerationMessages({ schema: schemaContext, question, history });
@@ -159,7 +159,7 @@ export class AiSqlService {
   }
 
   private async contextForSql(userId: string, connectionId: string, sql: string) {
-    const maxTables = this.config.get<number>('openai.maxSchemaTables') ?? 25;
+    const maxTables = this.config.get<number>('ai.maxSchemaTables') ?? 25;
     // Use the SQL text itself as the relevance query so referenced tables are included.
     return this.schema.buildContext(userId, connectionId, sql, maxTables);
   }

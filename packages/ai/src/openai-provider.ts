@@ -14,7 +14,18 @@ export interface OpenAiProviderOptions {
   model: string;
   fastModel: string;
   timeoutMs: number;
+  /** Point at any OpenAI-compatible endpoint (e.g. Groq's `https://api.groq.com/openai/v1`). */
   baseURL?: string;
+  /** Label used in `.name` and error messages. Defaults to 'openai'. */
+  providerName?: string;
+  /**
+   * 'json_schema' (default) asks the API to enforce the exact shape — OpenAI
+   * supports this for all current models. Some OpenAI-compatible providers
+   * (certain Groq models) only support plain JSON mode; set 'json_object' for
+   * those and the schema is instead spelled out in the prompt. Either way the
+   * response is validated against the Zod schema before it's trusted.
+   */
+  structuredOutputMode?: 'json_schema' | 'json_object';
 }
 
 function toUsage(usage: OpenAI.CompletionUsage | undefined): AiUsage | null {
@@ -27,10 +38,11 @@ function toUsage(usage: OpenAI.CompletionUsage | undefined): AiUsage | null {
 }
 
 export class OpenAiProvider implements AiProvider {
-  readonly name = 'openai';
+  readonly name: string;
   private readonly client: OpenAI;
 
   constructor(private readonly options: OpenAiProviderOptions) {
+    this.name = options.providerName ?? 'openai';
     this.client = new OpenAI({
       apiKey: options.apiKey,
       timeout: options.timeoutMs,
@@ -66,17 +78,29 @@ export class OpenAiProvider implements AiProvider {
     schemaName: string,
   ): Promise<AiStructuredResult<T>> {
     const jsonSchema = zodToJsonSchema(schema);
+    const mode = this.options.structuredOutputMode ?? 'json_schema';
+    const messages =
+      mode === 'json_object'
+        ? [
+            {
+              role: 'system' as const,
+              content: `Respond with ONLY a JSON object matching exactly this JSON Schema (no prose, no markdown fences):\n${JSON.stringify(jsonSchema)}`,
+            },
+            ...request.messages,
+          ]
+        : request.messages;
+
     try {
       const response = await this.client.chat.completions.create(
         {
           model: request.model ?? this.options.model,
           temperature: request.temperature ?? 0,
           max_tokens: request.maxTokens,
-          messages: request.messages,
-          response_format: {
-            type: 'json_schema',
-            json_schema: { name: schemaName, strict: true, schema: jsonSchema },
-          },
+          messages,
+          response_format:
+            mode === 'json_object'
+              ? { type: 'json_object' }
+              : { type: 'json_schema', json_schema: { name: schemaName, strict: true, schema: jsonSchema } },
         },
         { signal: request.signal },
       );
@@ -131,7 +155,11 @@ export class OpenAiProvider implements AiProvider {
     if (error instanceof AiProviderError) return error;
     if (error instanceof OpenAI.APIError) {
       const retryable = error.status === 429 || (error.status ?? 0) >= 500;
-      return new AiProviderError(`OpenAI request failed (${error.status}): ${error.message}`, error, retryable);
+      return new AiProviderError(
+        `${this.name} request failed (${error.status}): ${error.message}`,
+        error,
+        retryable,
+      );
     }
     if (error instanceof Error && error.name === 'AbortError') {
       return new AiProviderError('The AI request timed out.', error, true);
