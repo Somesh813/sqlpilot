@@ -108,6 +108,18 @@ export class WorkspaceComponent implements OnInit {
     this.sql.set(`SELECT *\nFROM ${name}\nLIMIT 100`);
   }
 
+  readonly examples = [
+    'Show the top 10 customers by total spending',
+    'How many records are in each table?',
+    'Show monthly totals over time',
+    'Which items are most popular?',
+  ];
+
+  askExample(text: string): void {
+    this.question.set(text);
+    this.ask();
+  }
+
   askAboutTable(name: string): void {
     this.question.set(`Describe the ${name} table and show a sample of its rows`);
     this.ask();
