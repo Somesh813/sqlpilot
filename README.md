@@ -263,12 +263,14 @@ reliability review is being worked through in phases:
 
 - Done: SQL security (AST validation, real read-only transactions, exact row caps), schema
   selection, grounded answers, truncation handling, killable SQLite queries, connection policy,
-  proxy handling, password-reset email, deployment hardening.
-- In progress: safe user-facing error messages, connection pooling, minimizing data sent to the
-  AI provider, schema validation of generated SQL, broader MySQL and frontend test coverage.
+  proxy handling, password-reset email, deployment hardening, safe error messages, persistent
+  connection pools, data minimisation for the AI provider, schema validation of generated SQL,
+  and a broad test suite (PostgreSQL, MySQL and SQLite against real servers, plus frontend tests).
+- Open: see the list in the acceptance document (notably lint is not set up, database TLS
+  certificates are not verified, and Docker has not been run end to end).
 
-MySQL support is implemented but has less automated test coverage than PostgreSQL and SQLite.
-[`PROGRESS.md`](./PROGRESS.md) has the detailed history.
+MySQL is tested against a real server, but a MySQL read-only transaction does not stop DDL, so use a SELECT-only account.
+[`docs/acceptance.md`](./docs/acceptance.md) lists every audit finding with its proof and the known open items; [`PROGRESS.md`](./PROGRESS.md) has the detailed history.
 
 ## Contributing
 
