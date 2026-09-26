@@ -12,6 +12,12 @@ const GUARDRAILS = [
   'Prefer explicit JOINs using the documented relationships. Prefer explicit column lists over SELECT *.',
   'Use parameter-free literals the user supplied; do not fabricate specific IDs.',
   'Keep "confidence" between 0 and 1 and be honest about uncertainty.',
+  'Earlier turns may contain previous questions and the SQL you wrote for them. Decide first: is the NEW message a follow-up, or a fresh question?',
+  'It is a FOLLOW-UP only if it cannot be understood on its own — it refers back ("only for 2026", "now the top 5", "and by city?", "sort that by date", "what about Delhi?"). Then MODIFY the previous SQL to apply it and keep earlier filters unless the user removes them.',
+  'It is a FRESH QUESTION if it is self-contained and names its own subject ("Show sales by month", "How many employees are there?"), even if it follows an unrelated earlier question. Then IGNORE the earlier turns entirely and NEVER try to combine it with them.',
+  'Select ONLY the columns needed to answer the question actually asked. Never carry columns, metrics or filters over from an earlier question unless the new message is a follow-up that asks for them.',
+  'Give every selected expression a short, readable snake_case alias (e.g. total_customers, total_spending) — the aliases become the column headings the user sees.',
+  'For charts: set visualization.type to bar for categories, line for time, pie only for shares of a whole with few categories, kpi for one number, table when the rows are text-heavy.',
 ].join('\n');
 
 export interface ConversationTurn {
@@ -32,8 +38,19 @@ export function buildSqlGenerationMessages(params: {
     },
   ];
 
-  for (const turn of params.history ?? []) {
-    messages.push({ role: turn.role, content: turn.content });
+  // Only the LAST exchange is offered, as labeled reference — never the whole chat. Feeding
+  // several earlier requests as live turns made the model try to answer all of them at once
+  // (UNIONing unrelated results); one clearly-labeled previous query is enough to refine.
+  const previous = (params.history ?? []).slice(-2);
+  if (previous.length > 0) {
+    messages.push({
+      role: 'system',
+      content: [
+        'PREVIOUS EXCHANGE — reference only. Use it ONLY if the new message is a follow-up that refers back to it',
+        '("only for 2026", "now the top 5", "and by city?"). If the new message is a self-contained question, IGNORE this completely.',
+        ...previous.map((t) => `${t.role === 'user' ? 'User asked' : 'You answered'}: ${t.content}`),
+      ].join('\n'),
+    });
   }
 
   messages.push({
@@ -100,6 +117,51 @@ export function buildSqlFixMessages(params: {
     {
       role: 'user',
       content: `Failing SQL:\n\n${params.sql}\n\nDatabase error:\n${params.databaseError}`,
+    },
+  ];
+}
+
+export function buildResultSummaryMessages(params: {
+  question: string;
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  totalRowCount: number;
+}): AiMessage[] {
+  const sample = params.rows.slice(0, 25);
+  return [
+    {
+      role: 'system',
+      content: [
+        "You are SQLPilot. Answer the user's question in 1-3 short, plain sentences, using ONLY the data provided.",
+        'The user is not technical: never mention SQL, tables, columns, queries, or joins.',
+        'Use thousands separators for large numbers. Write money without inventing a currency symbol.',
+        'For a single value, state it directly (e.g. "There are 1,250 customers."). For lists, name the top items and the overall picture.',
+        'If no rows were returned, say no matching records were found.',
+        'Never invent or estimate values that are not in the data.',
+      ].join('\n'),
+    },
+    {
+      role: 'user',
+      content: `Question: ${params.question}\n\nColumns: ${params.columns.join(', ')}\nTotal rows: ${params.totalRowCount}\nFirst ${sample.length} rows (JSON):\n${JSON.stringify(sample)}`,
+    },
+  ];
+}
+
+/** Cheap yes/no: does the new message depend on the previous question, or stand alone? */
+export function buildFollowUpCheckMessages(params: { previousQuestion: string; question: string }): AiMessage[] {
+  return [
+    {
+      role: 'system',
+      content: [
+        'Decide whether the NEW message can be understood on its own.',
+        'followUp = true ONLY if it depends on the previous question: it refers back (it/that/those/them), or modifies it ("only for 2026", "now the top 5", "and by city?", "also show email", "sort that by date", "what about Delhi?"), or omits its own subject.',
+        'followUp = false if it is a self-contained question that names its own subject ("Show sales by month", "How many employees are there?", "Show customers from Mumbai"), even when the topic is related to the previous question.',
+        'When unsure, answer false.',
+      ].join('\n'),
+    },
+    {
+      role: 'user',
+      content: `Previous question: ${params.previousQuestion}\nNew message: ${params.question}`,
     },
   ];
 }

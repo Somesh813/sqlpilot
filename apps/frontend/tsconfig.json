@@ -16,7 +16,14 @@
     "importHelpers": true,
     "target": "ES2022",
     "module": "ES2022",
-    "lib": ["ES2022", "dom"]
+    "lib": ["ES2022", "dom"],
+    "baseUrl": ".",
+    "paths": {
+      // Compile the shared package's TypeScript source directly. Consuming its prebuilt
+      // CommonJS dist made the dev server serve a stale cached copy after shared changed
+      // (runtime "isIdLike is not a function"); source is always current and hot-reloads.
+      "@sqlpilot/shared": ["../../packages/shared/src/index.ts"]
+    }
   },
   "angularCompilerOptions": {
     "enableI18nLegacyMessageIdFormat": false,

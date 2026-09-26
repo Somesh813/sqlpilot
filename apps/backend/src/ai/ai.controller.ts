@@ -1,6 +1,7 @@
 import { Body, Controller, HttpCode, Post, Req } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import {
+  AskResponse,
   ConversationMessageRole,
   GeneratedSql,
   SqlExplanation,
@@ -11,7 +12,8 @@ import { Request } from 'express';
 import { AuthenticatedUser, CurrentUser } from '../common/decorators/current-user.decorator';
 import { ConversationsService } from '../conversations/conversations.service';
 import { AiSqlService } from './ai-sql.service';
-import { ExplainSqlDto, FixSqlDto, GenerateSqlDto, OptimizeSqlDto } from './dto/ai.dto';
+import { AskService } from './ask.service';
+import { AskDto, ExplainSqlDto, FixSqlDto, GenerateSqlDto, OptimizeSqlDto } from './dto/ai.dto';
 
 function ctx(req: Request): { requestId: string | null; ip: string | null } {
   const id = (req as { id?: string | number }).id;
@@ -24,7 +26,19 @@ export class AiController {
   constructor(
     private readonly ai: AiSqlService,
     private readonly conversations: ConversationsService,
+    private readonly askService: AskService,
   ) {}
+
+  /** Natural language in, real answer + data out: the main entry point for the assistant. */
+  @Post('ask')
+  @HttpCode(200)
+  ask(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: AskDto,
+    @Req() req: Request,
+  ): Promise<AskResponse> {
+    return this.askService.ask(user.id, dto, ctx(req));
+  }
 
   @Post('generate-sql')
   @HttpCode(200)

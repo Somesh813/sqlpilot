@@ -47,3 +47,13 @@ export const sqlFixSchema = z.object({
   confidence: z.number(),
 });
 export type SqlFixModel = z.infer<typeof sqlFixSchema>;
+
+export const resultAnswerSchema = z.object({
+  answer: z.string(),
+});
+export type ResultAnswerModel = z.infer<typeof resultAnswerSchema>;
+
+export const followUpSchema = z.object({
+  followUp: z.boolean(),
+});
+export type FollowUpModel = z.infer<typeof followUpSchema>;

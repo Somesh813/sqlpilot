@@ -1,5 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import type {
+  AskResponse,
   Conversation,
   ConversationMessage,
   GeneratedSql,
@@ -13,6 +14,11 @@ import { ApiService } from '../core/services/api.service';
 @Injectable({ providedIn: 'root' })
 export class AssistantService {
   private readonly api = inject(ApiService);
+
+  /** Natural language in → answer + real data out (the assistant's main call). */
+  ask(connectionId: string, question: string, conversationId?: string): Observable<AskResponse> {
+    return this.api.post<AskResponse>('/ai/ask', { connectionId, question, conversationId });
+  }
 
   generateSql(connectionId: string, question: string, conversationId?: string): Observable<GeneratedSql> {
     return this.api.post<GeneratedSql>('/ai/generate-sql', { connectionId, question, conversationId });

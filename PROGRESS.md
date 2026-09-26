@@ -136,6 +136,29 @@ files (auth, app bootstrap, database-connections, schema discovery, query execut
 full USER-blocked/ADMIN-enables/INSERT-succeeds flow, saved queries/prompts/conversations/
 analytics, AI-disabled-provider behavior).
 
+## Natural-language answer flow (post-Phase 12)
+
+**Problem:** the assistant only *generated* SQL; nothing executed it, so results never reached the chat.
+The only place rows ever appeared was the separate Run button's pane.
+
+**Fix:** `POST /ai/ask` runs the whole chain in one call — generate → policy-validate → execute (read-only) →
+analyze the rows → write a plain-language answer from those rows → persist the turn — and returns one stable contract
+(`AskResponse` in `@sqlpilot/shared`). The chat renders answer → data → chart → SQL (last, behind a toggle).
+
+Bugs found by driving the real UI against the real model (not visible to unit tests):
+1. **Table rendered empty.** `TypeError: isIdLike is not a function` — the dev server served a stale cached CommonJS
+   copy of `@sqlpilot/shared`, and the exception aborted rendering mid-table. Fixed at the root: the frontend now compiles
+   the shared package's TypeScript *source* (tsconfig path) instead of a prebuilt dist.
+2. **Answers accumulated UNIONs across a chat.** Shown the previous query, the model extended it (even when told not to).
+   Fixed structurally: a fast follow-up classifier decides whether earlier context is sent at all; fresh questions get a clean
+   slate, follow-ups get only the *last* exchange.
+3. **Foreign connection ids returned a friendly 200** instead of 404 (error handler swallowed it, and a conversation was
+   created first). Ownership is now checked before anything else.
+
+Tests: 19 e2e for `/ai/ask` (scripted model; real DB/execution/analysis) incl. the regressions above; 15 for the
+result-analysis decision layer; 11 for the follow-up heuristic. Also verified live with Groq `openai/gpt-oss-120b`,
+driving the real UI: all 10 scenario questions in one continuous conversation, plus zero-row, unanswerable and follow-up cases.
+
 ## How to verify a phase
 
 ```bash

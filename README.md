@@ -232,10 +232,36 @@ Base path: `/api`. All routes require a `Bearer` access token except the ones ma
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/ai/generate-sql` | NL → structured SQL; appends to the conversation if `conversationId` is given |
+| POST | `/ai/ask` | **The assistant's main call.** Natural language in → answer, real rows, result type and chart recommendation out (see contract below) |
+| POST | `/ai/generate-sql` | NL → structured SQL only (no execution); appends to the conversation if `conversationId` is given |
 | POST | `/ai/explain-sql` | `mode: "simple" \| "technical"` |
 | POST | `/ai/optimize-sql` | Advisory optimization with a disclaimer, never a guarantee |
 | POST | `/ai/fix-sql` | Given the failing SQL + database error, returns a corrected query |
+
+#### `POST /ai/ask` response contract
+
+```jsonc
+{
+  "success": true,
+  "question": "Show the top 10 customers by spending",
+  "conversationId": "…",
+  "sql": "SELECT …",
+  "columns": ["customer_name", "total_spending"],
+  "rows": [{ "customer_name": "Kabir", "total_spending": 229500 }],
+  "rowCount": 10, "totalRowCount": 10, "truncated": false, "executionTimeMs": 3,
+  "resultType": "categorical",   // empty | single_value | table | categorical | time_series | multi_series | percentage_distribution | correlation
+  "visualization": { "recommended": true, "type": "bar", "xColumn": "customer_name", "yColumns": ["total_spending"] },
+  "availableViews": ["bar", "pie", "table"],   // only views that make sense for this data
+  "explanation": "The top 10 customers by spending are…",   // plain-language answer written from the ACTUAL rows
+  "queryExplanation": "…", "assumptions": [], "warnings": [], "autoFixed": false,
+  "error": null   // or { stage: "generation" | "execution", message, technical }
+}
+```
+
+Handled failures (not understood, unsafe SQL, database error) return **200** with `success: false` and a
+friendly `explanation`, so the UI always has something to show. A DB error is repaired automatically once.
+The chart type is decided by `analyzeResult()` in `@sqlpilot/shared` (deterministic; the model's opinion is only a hint),
+so a chart is never recommended for a single value, free text, or ID-only data.
 
 Every AI endpoint returns **503** with a clear message (never a crash) when the selected provider's key
 (`OPENAI_API_KEY` / `GROQ_API_KEY`) is unset. AI-generated SQL is re-validated by `@sqlpilot/sql-parser` before it's ever returned.

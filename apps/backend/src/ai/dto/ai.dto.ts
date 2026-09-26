@@ -1,5 +1,6 @@
 import {
   AiExplanationMode,
+  AskRequest,
   ExplainSqlRequest,
   FixSqlRequest,
   GenerateSqlRequest,
@@ -53,4 +54,18 @@ export class FixSqlDto implements FixSqlRequest {
   @IsString()
   @MaxLength(4000)
   databaseError!: string;
+}
+
+export class AskDto implements AskRequest {
+  @IsMongoId()
+  connectionId!: string;
+
+  @IsString()
+  @MinLength(2)
+  @MaxLength(2000)
+  question!: string;
+
+  @IsOptional()
+  @IsMongoId()
+  conversationId?: string;
 }

@@ -1,15 +1,15 @@
-<div class="flex h-full flex-col">
+<div class="flex h-full min-h-0 flex-col">
   <!-- top bar -->
-  <div class="flex items-center gap-3 border-b border-surface-border bg-surface-0 px-4 py-2">
+  <div class="flex flex-wrap items-center gap-3 border-b border-surface-border bg-surface-0 px-4 py-2">
     <button
       class="grid h-8 w-8 place-items-center rounded-lg border border-surface-border text-content hover:bg-surface-2"
       (click)="sidebarOpen.set(!sidebarOpen())"
-      title="Toggle schema explorer"
+      title="Show database tables"
     >
       ☰
     </button>
     <select
-      class="sp-input max-w-xs py-1.5 text-sm"
+      class="sp-input max-w-[14rem] py-1.5 text-sm"
       [ngModel]="connectionId()"
       (ngModelChange)="selectConnection($event)"
     >
@@ -18,16 +18,39 @@
         <option [value]="c.id">{{ c.name }} ({{ c.type }})</option>
       }
     </select>
+
+    <div class="flex rounded-xl border border-surface-border p-0.5 text-sm">
+      <button
+        class="rounded-lg px-3 py-1"
+        [class]="mode() === 'chat' ? 'bg-surface-2 text-content-strong' : 'text-content-muted hover:text-content-strong'"
+        (click)="mode.set('chat')"
+      >
+        ✦ Ask
+      </button>
+      <button
+        class="rounded-lg px-3 py-1"
+        [class]="mode() === 'editor' ? 'bg-surface-2 text-content-strong' : 'text-content-muted hover:text-content-strong'"
+        (click)="mode.set('editor')"
+      >
+        SQL editor
+      </button>
+    </div>
+
     @if (connections.loaded() && connections.connections().length === 0) {
       <a routerLink="/connections" class="text-sm text-brand-500">Add a connection →</a>
     }
-    <span class="ml-auto rounded-full bg-surface-2 px-2.5 py-1 text-xs text-content-muted">
-      {{ schema.current()?.tables?.length ?? 0 }} tables
-    </span>
+
+    <div class="ml-auto flex items-center gap-2">
+      @if (mode() === 'chat' && chat().length) {
+        <button class="sp-btn-ghost px-3 py-1 text-xs" (click)="newChat()">New chat</button>
+      }
+      <span class="rounded-full bg-surface-2 px-2.5 py-1 text-xs text-content-muted">
+        {{ schema.current()?.tables?.length ?? 0 }} tables
+      </span>
+    </div>
   </div>
 
   <div class="flex min-h-0 flex-1">
-    <!-- schema explorer -->
     @if (sidebarOpen()) {
       <aside class="hidden w-60 shrink-0 border-r border-surface-border bg-surface-1 lg:block">
         <sp-schema-explorer
@@ -54,19 +77,90 @@
           }
         </div>
       </div>
+    } @else if (mode() === 'chat') {
+      <!-- ============ CHAT ============ -->
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div #scroller class="sp-scroll min-h-0 flex-1 overflow-y-auto">
+          <div class="mx-auto w-full max-w-4xl space-y-6 px-4 py-6">
+            @if (chat().length === 0) {
+              <div class="pt-6 text-center">
+                <div class="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-brand-500/10 text-xl text-brand-500">✦</div>
+                <h2 class="mt-4 text-lg font-semibold text-content-strong">Ask your data anything</h2>
+                <p class="mx-auto mt-1 max-w-md text-sm text-content-muted">
+                  Type a question in plain English. SQLPilot finds the answer in your database and shows it as a table or chart — no SQL needed.
+                </p>
+                <div class="mx-auto mt-6 grid max-w-2xl gap-2 sm:grid-cols-2">
+                  @for (ex of examples; track ex) {
+                    <button
+                      class="rounded-xl border border-surface-border bg-surface-0 px-4 py-3 text-left text-sm text-content hover:border-brand-500/60 hover:text-content-strong"
+                      (click)="askExample(ex)"
+                    >
+                      {{ ex }}
+                    </button>
+                  }
+                </div>
+              </div>
+            }
+
+            @for (m of chat(); track $index) {
+              @if (m.role === 'user') {
+                <div class="flex justify-end">
+                  <div class="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-brand-600 px-4 py-2.5 text-sm text-white">
+                    {{ m.text }}
+                  </div>
+                </div>
+              } @else {
+                <div class="flex min-w-0 gap-3">
+                  <div class="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-500/10 text-sm text-brand-500">✦</div>
+                  <div class="min-w-0 flex-1">
+                    @if (m.response; as r) {
+                      <sp-answer-card [response]="r" (openInEditor)="openInEditor($event)" />
+                    } @else {
+                      <p class="text-[15px] text-content-strong">{{ m.text }}</p>
+                    }
+                  </div>
+                </div>
+              }
+            }
+
+            @if (thinking()) {
+              <div class="flex gap-3">
+                <div class="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-500/10 text-sm text-brand-500">✦</div>
+                <div class="pt-1 text-sm text-content-muted">
+                  <span class="mr-2 inline-block h-2 w-2 animate-pulse rounded-full bg-brand-500"></span>
+                  {{ progressLabel() }}
+                </div>
+              </div>
+            }
+          </div>
+        </div>
+
+        <div class="border-t border-surface-border bg-surface-0 px-4 py-3">
+          <div class="mx-auto flex w-full max-w-4xl gap-2">
+            <input
+              class="sp-input py-3"
+              placeholder="Ask anything about your data…"
+              [ngModel]="question()"
+              (ngModelChange)="question.set($event)"
+              (keyup.enter)="ask()"
+              [disabled]="thinking()"
+            />
+            <button class="sp-btn-primary shrink-0 px-6" [disabled]="thinking() || !question().trim()" (click)="ask()">
+              Ask
+            </button>
+          </div>
+        </div>
+      </div>
     } @else {
-      <!-- editor + results (centre) -->
-      <div class="sp-scroll order-2 flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto xl:order-1">
-        <!-- editor card -->
+      <!-- ============ ADVANCED SQL EDITOR ============ -->
+      <div class="sp-scroll flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
         <section class="shrink-0 border-b border-surface-border">
           <div class="flex flex-wrap items-center gap-1.5 px-3 py-2 text-xs">
             <span class="mr-1 text-[11px] font-semibold uppercase tracking-wide text-content-muted">SQL</span>
             <button class="sp-btn-ghost px-2.5 py-1" (click)="format()">Format</button>
             <button class="sp-btn-ghost px-2.5 py-1" (click)="validate()">Validate</button>
             <button class="sp-btn-ghost px-2.5 py-1" (click)="explain('simple')">Explain</button>
-            <button class="sp-btn-ghost hidden px-2.5 py-1 sm:inline-flex" (click)="explain('technical')">
-              Explain (tech)
-            </button>
+            <button class="sp-btn-ghost hidden px-2.5 py-1 sm:inline-flex" (click)="explain('technical')">Explain (tech)</button>
             <button class="sp-btn-ghost px-2.5 py-1" (click)="optimize()">Optimize</button>
             <button class="sp-btn-ghost px-2.5 py-1" (click)="saveQuery()">Save</button>
             <span class="ml-auto hidden text-[11px] text-content-muted md:inline">Ctrl + Enter to run</span>
@@ -78,11 +172,7 @@
           @if (validation(); as v) {
             <div
               class="mx-3 mb-2 rounded-lg border px-3 py-1.5 text-xs"
-              [class]="
-                v.valid
-                  ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-500'
-                  : 'border-red-500/30 bg-red-500/5 text-red-500'
-              "
+              [class]="v.valid ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-500' : 'border-red-500/30 bg-red-500/5 text-red-500'"
             >
               {{ v.valid ? 'Safe · ' + v.statementKind + ' · risk ' + v.risk : v.violations[0].message }}
               @if (v.valid && v.hasLimit) { · LIMIT enforced }
@@ -96,9 +186,7 @@
           @if (panel() !== 'none') {
             <div class="sp-scroll max-h-56 overflow-y-auto border-t border-surface-border bg-surface-1 p-3 text-xs">
               <div class="mb-1 flex items-center justify-between">
-                <span class="font-medium text-content-strong">
-                  {{ panel() === 'explain' ? 'Explanation' : 'Optimization' }}
-                </span>
+                <span class="font-medium text-content-strong">{{ panel() === 'explain' ? 'Explanation' : 'Optimization' }}</span>
                 <button class="text-content-muted hover:text-content-strong" (click)="panel.set('none')">✕</button>
               </div>
               @if (panel() === 'explain') {
@@ -128,7 +216,6 @@
           }
         </section>
 
-        <!-- results -->
         <section class="flex min-h-[22rem] flex-1 flex-col">
           @if (execError(); as err) {
             <div class="sp-scroll flex-1 overflow-y-auto p-4 text-sm">
@@ -136,135 +223,56 @@
               <p class="mt-1 text-content">{{ err.message }}</p>
               @if (err.databaseError) {
                 <pre class="mt-2 whitespace-pre-wrap rounded-lg bg-surface-1 p-2 font-mono text-xs text-content-muted">{{ err.databaseError }}</pre>
-                <button class="sp-btn-primary mt-3 px-3 py-1.5" [disabled]="thinking()" (click)="fixWithAi()">
-                  ✦ Fix with AI
-                </button>
+                <button class="sp-btn-primary mt-3 px-3 py-1.5" (click)="fixWithAi()">✦ Fix with AI</button>
               }
             </div>
           } @else {
             @if (result(); as r) {
-              <div class="flex items-center gap-1 border-b border-surface-border px-3 py-1.5 text-xs">
-                <button
-                  class="rounded-lg px-3 py-1"
-                  [class]="resultTab() === 'table' ? 'bg-surface-2 text-content-strong' : 'text-content-muted'"
-                  (click)="resultTab.set('table')"
-                >
-                  Table
-                </button>
-                <button
-                  class="rounded-lg px-3 py-1"
-                  [class]="resultTab() === 'chart' ? 'bg-surface-2 text-content-strong' : 'text-content-muted'"
-                  (click)="resultTab.set('chart')"
-                >
-                  Chart
-                </button>
-                @if (resultTab() === 'chart') {
-                  <select class="sp-input ml-2 w-28 py-1 text-xs" [ngModel]="vizType()" (ngModelChange)="vizType.set($event)">
-                    @for (v of vizOptions; track v) { <option [value]="v">{{ v }}</option> }
-                  </select>
-                }
-              </div>
+              @if (vizOptions().length) {
+                <div class="flex items-center gap-1 border-b border-surface-border px-3 py-1.5 text-xs">
+                  <button
+                    class="rounded-lg px-3 py-1"
+                    [class]="resultTab() === 'table' ? 'bg-surface-2 text-content-strong' : 'text-content-muted'"
+                    (click)="resultTab.set('table')"
+                  >
+                    Table
+                  </button>
+                  <button
+                    class="rounded-lg px-3 py-1"
+                    [class]="resultTab() === 'chart' ? 'bg-surface-2 text-content-strong' : 'text-content-muted'"
+                    (click)="resultTab.set('chart')"
+                  >
+                    Chart
+                  </button>
+                  @if (resultTab() === 'chart') {
+                    <select class="sp-input ml-2 w-28 py-1 text-xs" [ngModel]="vizType()" (ngModelChange)="vizType.set($event)">
+                      @for (v of vizOptions(); track v) { <option [value]="v">{{ v }}</option> }
+                    </select>
+                  }
+                </div>
+              }
               <div class="min-h-0 flex-1">
-                @if (resultTab() === 'table') {
+                @if (resultTab() === 'table' || !vizOptions().length) {
                   <sp-results-grid [result]="r" (pageChange)="run($event)" />
                 } @else {
                   <div class="h-full min-h-[18rem] p-3">
-                    <sp-chart [result]="r" [type]="vizType()" />
+                    <sp-chart
+                      [result]="r"
+                      [type]="vizType()"
+                      [xField]="analysis()?.visualization?.xColumn ?? null"
+                      [yFields]="analysis()?.visualization?.yColumns ?? []"
+                    />
                   </div>
                 }
               </div>
             } @else {
-              <div class="grid flex-1 place-items-center p-6 text-center">
-                <div>
-                  <p class="text-sm font-medium text-content-strong">No results yet</p>
-                  <p class="mt-1 text-xs text-content-muted">
-                    Ask the assistant a question, or write SQL above and press Run.
-                  </p>
-                </div>
+              <div class="grid flex-1 place-items-center p-6 text-center text-xs text-content-muted">
+                Write SQL above and press Run. Or switch to “Ask” and just describe what you want.
               </div>
             }
           }
         </section>
       </div>
-
-      <!-- assistant panel -->
-      <aside
-        class="order-1 flex h-72 shrink-0 flex-col border-b border-surface-border bg-surface-1/40 xl:order-2 xl:h-auto xl:w-[24rem] xl:border-b-0 xl:border-l"
-      >
-        <div class="flex items-center gap-2 border-b border-surface-border px-4 py-2.5">
-          <span class="text-brand-500">✦</span>
-          <span class="text-sm font-medium text-content-strong">Ask SQLPilot</span>
-          @if (chat().length) {
-            <button class="ml-auto text-xs text-content-muted hover:text-content-strong" (click)="chat.set([])">
-              Clear
-            </button>
-          }
-        </div>
-
-        <div class="sp-scroll min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-          @if (chat().length === 0) {
-            <div class="pt-2">
-              <p class="text-sm text-content">Ask a question about your data in plain English.</p>
-              <div class="mt-3 flex flex-col gap-2">
-                @for (ex of examples; track ex) {
-                  <button
-                    class="rounded-xl border border-surface-border bg-surface-0 px-3 py-2 text-left text-xs text-content hover:border-brand-500/60 hover:text-content-strong"
-                    (click)="askExample(ex)"
-                  >
-                    {{ ex }}
-                  </button>
-                }
-              </div>
-            </div>
-          }
-          @for (m of chat(); track $index) {
-            <div class="flex" [class.justify-end]="m.role === 'user'">
-              <div
-                class="max-w-[92%] rounded-2xl px-3.5 py-2 text-sm"
-                [class]="m.role === 'user' ? 'bg-brand-600 text-white' : 'sp-card'"
-              >
-                <p class="whitespace-pre-wrap">{{ m.text }}</p>
-                @if (m.generated && m.generated.sql) {
-                  <div class="mt-2 space-y-1 border-t border-surface-border pt-2 text-xs text-content-muted">
-                    <p class="text-emerald-500">↙ SQL loaded in the editor</p>
-                    @if (m.generated.assumptions.length) {
-                      <details>
-                        <summary class="cursor-pointer hover:text-content-strong">Assumptions</summary>
-                        <ul class="mt-1 list-disc pl-4">
-                          @for (a of m.generated.assumptions; track a) { <li>{{ a }}</li> }
-                        </ul>
-                      </details>
-                    }
-                    <p>
-                      {{ m.generated.tablesUsed.join(', ') }} · {{ (m.generated.confidence * 100).toFixed(0) }}%
-                      confident
-                    </p>
-                    @for (w of m.generated.warnings; track w) {
-                      <p class="text-amber-500">⚠ {{ w }}</p>
-                    }
-                  </div>
-                }
-              </div>
-            </div>
-          }
-          @if (thinking()) {
-            <div class="flex"><div class="sp-card px-3.5 py-2 text-sm text-content-muted">Thinking…</div></div>
-          }
-        </div>
-
-        <div class="border-t border-surface-border p-3">
-          <div class="flex gap-2">
-            <input
-              class="sp-input"
-              placeholder="Ask anything about your data…"
-              [ngModel]="question()"
-              (ngModelChange)="question.set($event)"
-              (keyup.enter)="ask()"
-            />
-            <button class="sp-btn-primary shrink-0" [disabled]="thinking()" (click)="ask()">Ask</button>
-          </div>
-        </div>
-      </aside>
     }
   </div>
 </div>

@@ -6,7 +6,11 @@ import {
   buildSqlExplanationMessages,
   buildSqlFixMessages,
   buildSqlGenerationMessages,
+  buildFollowUpCheckMessages,
+  buildResultSummaryMessages,
+  followUpSchema,
   buildSqlOptimizationMessages,
+  resultAnswerSchema,
   generatedSqlSchema,
   sqlExplanationSchema,
   sqlFixSchema,
@@ -158,6 +162,57 @@ export class AiSqlService {
     };
   }
 
+  /**
+   * Writes a short plain-language answer from the ACTUAL result rows. Returns null on
+   * any failure so the caller can fall back to a deterministic description — a failed
+   * summary must never cost the user their data.
+   */
+  async summarize(
+    question: string,
+    columns: string[],
+    rows: Array<Record<string, unknown>>,
+    totalRowCount: number,
+  ): Promise<string | null> {
+    try {
+      const messages = buildResultSummaryMessages({ question, columns, rows, totalRowCount });
+      const { data } = await this.ai.completeStructured(
+        { messages, temperature: 0.2, model: this.fastModel() },
+        resultAnswerSchema,
+        'result_answer',
+      );
+      return data.answer.trim() || null;
+    } catch (error) {
+      this.logger.warn(`Result summary failed, using fallback: ${String(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Does `question` depend on the previous question? Decides whether earlier context is
+   * sent to the SQL model at all: a fresh question gets a clean slate, because a model
+   * shown a previous query tends to extend it (accumulating UNIONs) even when told not to.
+   * Falls back to a conservative heuristic if the classifier call fails.
+   */
+  async isFollowUp(question: string, previousQuestion: string): Promise<boolean> {
+    try {
+      const messages = buildFollowUpCheckMessages({ previousQuestion, question });
+      const { data } = await this.ai.completeStructured(
+        { messages, temperature: 0, model: this.fastModel() },
+        followUpSchema,
+        'follow_up_check',
+      );
+      return data.followUp;
+    } catch (error) {
+      this.logger.warn(`Follow-up check failed, using heuristic: ${String(error)}`);
+      return looksLikeFollowUp(question);
+    }
+  }
+
+  private fastModel(): string | undefined {
+    const ai = this.config.get<{ provider: string; openai: { fastModel: string }; groq: { fastModel: string } }>('ai');
+    return ai?.provider === 'groq' ? ai.groq.fastModel : ai?.openai.fastModel;
+  }
+
   private async contextForSql(userId: string, connectionId: string, sql: string) {
     const maxTables = this.config.get<number>('ai.maxSchemaTables') ?? 25;
     // Use the SQL text itself as the relevance query so referenced tables are included.
@@ -180,4 +235,15 @@ export class AiSqlService {
 function clamp01(n: number): number {
   if (Number.isNaN(n)) return 0;
   return Math.min(1, Math.max(0, n));
+}
+
+/** Short messages that lean on the previous turn: "only 2026", "now the top 5", "what about Delhi?" */
+export function looksLikeFollowUp(question: string): boolean {
+  const q = question.trim();
+  const words = q.split(/\s+/).length;
+  if (words > 10) return false;
+  return (
+    /^(now|only|also|and|but|then|just|instead|same|sort|order|limit|filter|exclude|remove|add|what about|how about|show only)\b/i.test(q) ||
+    /\b(it|that|those|them|these|previous|above|same)\b/i.test(q)
+  );
 }
