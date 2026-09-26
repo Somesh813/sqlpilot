@@ -152,7 +152,7 @@ that each stand on their own.
 | --- | --- |
 | AST validation | One statement only, and it must be a `SELECT` or a `WITH` over `SELECT`s. Rejects `INSERT`, `UPDATE`, `DELETE`, DDL, `GRANT`/`REVOKE`, `SELECT INTO`, `FOR UPDATE`, nested data-modifying CTEs, and about 100 dangerous functions (`pg_read_file`, `lo_import`, `dblink`, `pg_sleep`, `nextval`, `LOAD_FILE`, `SLEEP`, `load_extension` and more). Anything it cannot parse is rejected. |
 | Dialect-aware lexing | Comments are removed using each engine's real rules (`#` in MySQL, nested comments in PostgreSQL, dollar-quotes). The text that is validated is exactly the text that runs. |
-| Database-enforced read-only | PostgreSQL `BEGIN READ ONLY`, MySQL `START TRANSACTION READ ONLY`, SQLite `query_only`. A last-line check also refuses `COPY … PROGRAM`, which a read-only transaction does not stop for a superuser. |
+| Database-enforced read-only | PostgreSQL `BEGIN READ ONLY` (refuses all writes and DDL), SQLite `query_only` and a read-only file handle, MySQL `START TRANSACTION READ ONLY`. **MySQL's read-only transaction refuses DML but not DDL** (verified on 8.0.43: `DROP`, `CREATE`, `TRUNCATE` and `ALTER` succeed inside it), so on MySQL the AST validator and a driver check that only `SELECT`/`WITH` statements are sent carry that load. That check also refuses `COPY … PROGRAM` on PostgreSQL. For MySQL, connect with an account that has only `SELECT`. |
 | Schema validation | Before an AI-written query runs, every table and column it names is checked against the connection's real schema (aliases, CTEs and subqueries understood; system catalogs and other schemas refused). A miss is sent back to the model as a structured problem with close matches and where the column actually lives, for at most two repairs in total, and each repair is checked again. A repair that repeats earlier SQL ends the loop. |
 | Resource limits | Statement timeout, row cap by fetching `limit + 1`, and SQLite queries in a child process that is killed on timeout so a heavy query cannot freeze the API. |
 | Connection policy | SQLite files only inside approved directories (symlinks resolved, one uniform error). Network hosts checked against an allowlist or blocked if private, loopback or metadata. Errors shown to users are generic. |
@@ -235,16 +235,26 @@ Expected failures (not understood, unsafe SQL, database error) come back as `200
 ## Testing
 
 ```bash
-npm test                # unit tests for every package and the backend
-npm run test:e2e        # backend end-to-end tests (in-memory MongoDB)
+npm test                # unit + integration tests for every package and the backend
+npm run test:e2e        # backend end-to-end tests (in-memory MongoDB, real SQLite)
+npm run test:frontend   # Angular component tests in headless Chrome
+npm run test:all        # all of the above
 npm run build           # packages, backend and frontend
 ```
 
-The PostgreSQL driver tests start a real PostgreSQL server automatically (`embedded-postgres`),
-or use your own by setting `PG_TEST_URL`. The security suite covers `DROP`, `DELETE`, `UPDATE`,
-`INSERT`, `ALTER`, `TRUNCATE`, `SELECT INTO`, nested and comment-hidden SQL, dangerous functions,
-huge and nested `LIMIT`s and stacked statements, and the driver tests check that the database
-itself refuses them.
+- **PostgreSQL and MySQL are tested against real servers.** The driver tests start them automatically
+  (`embedded-postgres`, `mysql-memory-server`; the first MySQL run downloads the server binary), or use
+  your own with `PG_TEST_URL=postgres://user:pw@host:port/db` and `MYSQL_TEST_URL=mysql://user:pw@host:port/db`.
+  Use throwaway databases: the tests create and drop tables.
+- **Security suite:** `DROP`, `DELETE`, `UPDATE`, `INSERT`, `ALTER`, `TRUNCATE`, `SELECT INTO`, nested and
+  comment-hidden SQL, dangerous functions, huge and nested `LIMIT`s and stacked statements, checked at the
+  parser, at each database driver, and through the whole HTTP stack, including with writes globally enabled.
+- **Data suite:** 0, 1, 999, 1,000, 1,001 and 1,500 rows, NULLs, dates, exact decimals, rupee amounts and Hindi text on all three engines.
+- **AI scenarios:** multi-hop joins over a 5-table database, a missing intermediate table, hallucinated tables
+  and columns, follow-ups that filter and un-filter, and contradictory answers, with expected numbers computed
+  independently of the pipeline.
+- **Frontend:** table, chart, KPI, loading, error, empty, truncated and wide-table states, plus the ask flow.
+  Set `CHROME_BIN` if Chrome is not on the default path.
 
 ## Project status
 

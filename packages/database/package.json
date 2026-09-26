@@ -23,6 +23,7 @@
     "@types/pg-cursor": "^2.7.2",
     "embedded-postgres": "^18.4.0-beta.17",
     "jest": "^29.7.0",
+    "mysql-memory-server": "^1.16.0",
     "rimraf": "^6.0.1",
     "ts-jest": "^29.2.5",
     "typescript": "^5.5.4"

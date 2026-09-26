@@ -128,6 +128,7 @@ export class AiSqlService {
       assumptions: data.assumptions,
       confidence: clamp01(data.confidence),
       warnings,
+      blockedByPolicy: validation && !validation.valid ? [...new Set(validation.violations.map((v) => v.code))] : null,
       unanswerable: data.unanswerable || Boolean(validation && !validation.valid),
       unanswerableReason:
         data.unanswerableReason ??

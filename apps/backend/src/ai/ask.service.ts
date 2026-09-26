@@ -96,6 +96,19 @@ export class AskService {
       return this.fail(userId, base, 'generation', code, viewer.isAdmin ? detail : null);
     }
 
+    if (generated.blockedByPolicy?.length) {
+      // The model wrote SQL that the safety policy refuses. It is never run, and the user is told
+      // plainly that the request was not a safe read-only question (not "I did not understand").
+      this.logger.warn(`Generated SQL blocked by policy [${ctx.requestId ?? '-'}]: ${generated.blockedByPolicy.join(', ')}`);
+      return this.fail(
+        userId,
+        { ...base, ...this.meta(generated) },
+        'generation',
+        'UNSAFE_QUERY',
+        viewer.isAdmin ? `Blocked by safety policy: ${generated.blockedByPolicy.join(', ')}` : null,
+      );
+    }
+
     if (generated.unanswerable || !generated.sql.trim()) {
       const reason = generated.unanswerableReason?.trim();
       // Say why, then show what does work — a dead-end reply teaches a non-technical user nothing.

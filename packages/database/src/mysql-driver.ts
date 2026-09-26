@@ -262,13 +262,17 @@ function streamRows(conn: mysql.PoolConnection, sql: string, limit: number, time
 
     // `conn.connection` is the underlying event-emitting connection of the promise wrapper.
     const query = (conn as unknown as { connection: CallbackConnection }).connection.query({ sql });
-    query.on('fields', (f: mysql.FieldPacket[]) => {
-      fields = f;
+    query.on('fields', (f: mysql.FieldPacket[] | null) => {
+      // INSERT/UPDATE/DELETE emit 'fields' with null (there is no result set)
+      fields = Array.isArray(f) ? f : [];
     });
     query.on('result', (row: Record<string, unknown> & { affectedRows?: number }) => {
       if (settled) return;
       if (fields.length === 0 && typeof row.affectedRows === 'number') {
+        // INSERT / UPDATE / DELETE: the server answers with a single OK packet. mysql2 does not
+        // emit 'end' for it, so the statement is complete right here.
         affectedRows = row.affectedRows;
+        finish(() => resolve({ rows, fields, affectedRows, abandoned: false }));
         return;
       }
       rows.push(row);
