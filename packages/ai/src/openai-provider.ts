@@ -159,9 +159,13 @@ export class OpenAiProvider implements AiProvider {
     if (error instanceof AiProviderError) return error;
     if (error instanceof OpenAI.APIError) {
       const status = error.status;
-      const retryable = status === 429 || (status ?? 0) >= 500;
-      const code: AiErrorCode =
-        status === 429
+      const retryable = status === 429 || (status ?? 0) >= 500 || (status === 400 && /failed to validate json|failed_generation|json_validate_failed/i.test(error.message));
+      // The model produced output the API rejected as invalid JSON (Groq: 400 "Failed to validate
+      // JSON ... failed_generation"). That is the model misbehaving, not a bad request: retryable.
+      const badGeneration = status === 400 && /failed to validate json|failed_generation|json_validate_failed/i.test(error.message);
+      const code: AiErrorCode = badGeneration
+        ? 'BAD_RESPONSE'
+        : status === 429
           ? 'RATE_LIMITED'
           : status === 401 || status === 403 || status === 404
             ? 'NOT_CONFIGURED' // bad key, no access to the model, wrong model id: an operator problem

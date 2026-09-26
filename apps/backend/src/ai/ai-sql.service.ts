@@ -279,17 +279,30 @@ export class AiSqlService {
   }
 
   private async call<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (error) {
-      if (error instanceof AiProviderError) {
-        // The raw provider text (which can hold organisation ids, limits, model names) stays in
-        // the log, scrubbed. The caller gets a safe message and a coded, developer-safe detail.
-        this.logger.warn(`AI provider error [${error.code}${error.status ? ` ${error.status}` : ''}]: ${sanitizeTechnical(error.message)}`);
-        throw aiErrorToSafe(error);
+    // A model occasionally returns output that is not valid JSON or does not fit the schema. That is
+    // usually a one-off, so the call is retried once before the user is told anything.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (error instanceof AiProviderError && error.code === 'BAD_RESPONSE' && attempt === 0) {
+          this.logger.warn('The model returned an unusable response; retrying once.');
+          continue;
+        }
+        throw this.toSafe(error);
       }
-      throw error;
     }
+  }
+
+  /** Provider failures become a safe exception; anything else passes through unchanged. */
+  private toSafe(error: unknown): unknown {
+    if (error instanceof AiProviderError) {
+      // The raw provider text (which can hold organisation ids, limits, model names) stays in
+      // the log, scrubbed. The caller gets a safe message and a coded, developer-safe detail.
+      this.logger.warn(`AI provider error [${error.code}${error.status ? ` ${error.status}` : ''}]: ${sanitizeTechnical(error.message)}`);
+      return aiErrorToSafe(error);
+    }
+    return error;
   }
 }
 

@@ -561,6 +561,36 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
       expect(JSON.stringify(res.body)).not.toMatch(FORBIDDEN);
     });
 
+    it('one unusable model response is retried transparently and the user still gets the answer', async () => {
+      const { AiProviderError } = await import('@sqlpilot/ai');
+      provider.generateError = new AiProviderError('400 Failed to validate JSON', undefined, true, 'BAD_RESPONSE', 400);
+      provider.generated = [gen('SELECT COUNT(*) AS n FROM customers')];
+      provider.answers = ['There are 4 customers.'];
+      const res = await ask('How many customers are there?').expect(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.rows).toEqual([{ n: 4 }]);
+      expect(provider.calls.filter((c) => c.name === 'generated_sql')).toHaveLength(2);
+    });
+
+    it('two unusable responses in a row give the friendly message, after exactly one retry', async () => {
+      const { AiProviderError } = await import('@sqlpilot/ai');
+      let n = 0;
+      const original = provider.completeStructured.bind(provider);
+      provider.completeStructured = (async (req: never, schema: never, name: string) => {
+        if (name === 'generated_sql') {
+          n++;
+          throw new AiProviderError('400 Failed to validate JSON', undefined, true, 'BAD_RESPONSE', 400);
+        }
+        return original(req, schema, name);
+      }) as never;
+      const res = await ask('Show all customers').expect(200);
+      provider.completeStructured = original as never;
+      expect(n).toBe(2);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('AI_BAD_RESPONSE');
+      expect(res.body.error.message).toBe('I could not turn that into a query. Try rephrasing your question.');
+    });
+
     it.each([
       ['TIMEOUT', 'AI_TIMEOUT', /took too long/],
       ['UNAVAILABLE', 'AI_UNAVAILABLE', /temporarily unavailable/],

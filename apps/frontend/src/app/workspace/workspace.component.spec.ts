@@ -175,4 +175,65 @@ describe('WorkspaceComponent: the ask flow as a user sees it', () => {
     expect(fixture.componentInstance.question()).toBe('');
     pendingAsk().flush(askResponse());
   });
+
+  describe('the question box (DOM)', () => {
+    const input = () => el().querySelector('input[placeholder^="Ask anything"]') as HTMLInputElement;
+    // whenStable() never settles while the progress timer runs, so wait a beat instead
+    const settle = () => new Promise((r) => setTimeout(r, 30));
+    const typeIntoBox = async (value: string) => {
+      input().value = value;
+      input().dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+      await settle();
+    };
+    const enter = () => input().dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }));
+
+    it('is emptied on screen after a successful ask, ready for the next question', async () => {
+      start();
+      await typeIntoBox('First question');
+      enter();
+      fixture.detectChanges();
+      await settle();
+      pendingAsk().flush(askResponse());
+      fixture.detectChanges();
+      await settle();
+      expect(input().value).toBe('');
+      await typeIntoBox('Second question');
+      expect(fixture.componentInstance.question()).toBe('Second question'); // not "First questionSecond question"
+    });
+
+    it('is emptied on screen even when Enter arrives in the same tick as the last keystroke (no change detection in between)', async () => {
+      start();
+      // typing and pressing Enter back to back, as fast typists, paste-and-enter and automation do
+      input().focus();
+      for (const ch of 'Filter those to Mumbai.') {
+        input().value += ch;
+        input().dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      enter();
+      fixture.detectChanges();
+      await settle();
+      const req = pendingAsk();
+      expect(req.request.body.question).toBe('Filter those to Mumbai.');
+      req.flush(askResponse());
+      fixture.detectChanges();
+      await settle();
+      expect(fixture.componentInstance.question()).toBe('');
+      expect(input().value).toBe(''); // the screen agrees with the model
+      await typeIntoBox('Remove the filter.');
+      expect(fixture.componentInstance.question()).toBe('Remove the filter.'); // and the next question is not glued to the old one
+    });
+
+    it('is emptied on screen after a failed ask too', async () => {
+      start();
+      await typeIntoBox('First question');
+      enter();
+      fixture.detectChanges();
+      await settle();
+      pendingAsk().flush({ message: 'x' }, { status: 503, statusText: 'Service Unavailable' });
+      fixture.detectChanges();
+      await settle();
+      expect(input().value).toBe('');
+    });
+  });
 });
