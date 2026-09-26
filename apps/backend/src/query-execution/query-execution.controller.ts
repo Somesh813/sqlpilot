@@ -38,8 +38,6 @@ export class QueryExecutionController {
       {
         sql: dto.sql,
         confirmed: dto.confirmed,
-        page: dto.page,
-        pageSize: dto.pageSize,
         prompt: dto.prompt,
         conversationId: dto.conversationId,
         aiGenerated: dto.aiGenerated,

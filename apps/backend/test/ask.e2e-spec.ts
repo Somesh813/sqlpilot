@@ -171,7 +171,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
       success: true,
       columns: ['total_customers'],
       rows: [{ total_customers: 4 }],
-      rowCount: 1,
+      returnedRows: 1,
       resultType: 'single_value',
       explanation: 'Stub answer from the actual rows.',
     });
@@ -183,7 +183,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
   it('"Show all customers" → table only, real rows, no chart offered', async () => {
     provider.generated = [gen('SELECT name, email FROM customers ORDER BY name')];
     const res = await ask('Show all customers').expect(200);
-    expect(res.body.rowCount).toBe(4);
+    expect(res.body.returnedRows).toBe(4);
     expect(res.body.rows[0]).toEqual({ name: 'Ada', email: 'ada@x.com' });
     expect(res.body.availableViews).toEqual(['table']);
     expect(res.body.visualization.recommended).toBe(false);
@@ -242,7 +242,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
   it('zero rows → success with an explicit empty result, never a blank response', async () => {
     provider.generated = [gen("SELECT name FROM customers WHERE city = 'Atlantis'")];
     const res = await ask('Show customers from Atlantis').expect(200);
-    expect(res.body).toMatchObject({ success: true, rowCount: 0, resultType: 'empty' });
+    expect(res.body).toMatchObject({ success: true, returnedRows: 0, resultType: 'empty' });
     expect(res.body.explanation).toBeTruthy();
     expect(res.body.availableViews).toEqual(['table']);
   });
@@ -263,7 +263,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.autoFixed).toBe(true);
     expect(res.body.sql).toBe('SELECT name FROM customers');
-    expect(res.body.rowCount).toBe(4);
+    expect(res.body.returnedRows).toBe(4);
   });
 
   it('an unrepairable DB error → friendly message + technical detail, not a blank reply', async () => {
@@ -299,7 +299,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
       gen('', { unanswerable: true, unanswerableReason: 'The data for that is not available in the current schema.' }),
     ];
     const res = await ask('What is the weather in Paris?').expect(200);
-    expect(res.body).toMatchObject({ success: false, rowCount: 0 });
+    expect(res.body).toMatchObject({ success: false, returnedRows: 0 });
     expect(res.body.error.stage).toBe('generation');
     expect(res.body.explanation).toMatch(/not available/i);
   });

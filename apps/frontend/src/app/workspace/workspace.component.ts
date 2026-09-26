@@ -245,7 +245,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
     });
   }
 
-  run(page = 1): void {
+  run(): void {
     if (!this.canRun() || this.running()) return;
     this.running.set(true);
     this.execError.set(null);
@@ -254,7 +254,6 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
         connectionId: this.connectionId(),
         sql: this.sql(),
         confirmed: true,
-        page,
         conversationId: this.conversationId() ?? undefined,
       })
       .subscribe({

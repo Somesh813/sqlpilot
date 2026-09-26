@@ -93,7 +93,7 @@ export class AskService {
         result = await this.queries.execute(
           userId,
           req.connectionId,
-          { sql, confirmed: true, prompt: question, conversationId, aiGenerated: true },
+          { sql, confirmed: true, forceReadOnly: true, prompt: question, conversationId, aiGenerated: true },
           ctx,
         );
       } catch (error) {
@@ -135,7 +135,7 @@ export class AskService {
     // ---- 3. decide how to show it, then say it in words ----
     const columns = result.columns.map((c) => c.name);
     const analysis = this.analyze(columns, result.rows, generated);
-    const totalRowCount = result.totalRowCount ?? result.rowCount;
+    const totalRowCount = result.totalRows ?? result.returnedRows;
     const answer =
       (await this.ai.summarize(question, columns, result.rows, totalRowCount)) ??
       this.describe(columns, result.rows, totalRowCount, analysis);
@@ -148,8 +148,8 @@ export class AskService {
       columns,
       columnTypes: Object.fromEntries(result.columns.map((c) => [c.name, c.type])),
       rows: result.rows,
-      rowCount: result.rowCount,
-      totalRowCount: result.totalRowCount,
+      returnedRows: result.returnedRows,
+      totalRows: result.totalRows,
       truncated: result.truncated,
       executionTimeMs: result.executionTimeMs,
       resultType: analysis.resultType,
@@ -239,7 +239,7 @@ export class AskService {
         role: ConversationMessageRole.ASSISTANT,
         content: r.explanation,
         sql: r.sql || null,
-        metadata: { success: r.success, rowCount: r.rowCount, resultType: r.resultType, columns: r.columns },
+        metadata: { success: r.success, rowCount: r.returnedRows, resultType: r.resultType, columns: r.columns },
       });
     } catch (error) {
       // Losing chat history must not lose the answer.
@@ -276,8 +276,8 @@ export class AskService {
       columns: [],
       columnTypes: {},
       rows: [],
-      rowCount: 0,
-      totalRowCount: 0,
+      returnedRows: 0,
+      totalRows: 0,
       truncated: false,
       executionTimeMs: 0,
       resultType: 'empty',

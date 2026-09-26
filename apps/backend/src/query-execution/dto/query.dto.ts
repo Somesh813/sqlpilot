@@ -1,13 +1,10 @@
 import { ExecuteQueryRequest, ValidateQueryRequest } from '@sqlpilot/shared';
-import { Type } from 'class-transformer';
 import {
   IsBoolean,
-  IsInt,
   IsMongoId,
   IsOptional,
   IsString,
   MaxLength,
-  Min,
 } from 'class-validator';
 
 const MAX_SQL_LENGTH = 20_000;
@@ -40,18 +37,6 @@ export class ExecuteQueryDto implements ExecuteQueryRequest {
   @IsString()
   @MaxLength(2000)
   prompt?: string;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  page?: number;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  pageSize?: number;
 
   @IsOptional()
   @IsBoolean()

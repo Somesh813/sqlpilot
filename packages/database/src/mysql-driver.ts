@@ -1,6 +1,7 @@
 import { DatabaseType, QueryResult, QueryStatus, TableSchema, TestConnectionResult } from '@sqlpilot/shared';
+import type { Connection as CallbackConnection } from 'mysql2';
 import * as mysql from 'mysql2/promise';
-import { DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
+import { assertReadShaped, countSql, DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
 
 export class MysqlDriver implements SqlDriver {
   readonly type = DatabaseType.MYSQL;
@@ -25,11 +26,24 @@ export class MysqlDriver implements SqlDriver {
     const start = Date.now();
     try {
       const [rows] = await this.pool.query<mysql.RowDataPacket[]>('SELECT VERSION() AS version');
+      const warnings: string[] = [];
+      try {
+        const [grants] = await this.pool.query<mysql.RowDataPacket[]>('SHOW GRANTS FOR CURRENT_USER()');
+        const text = grants.map((g) => String(Object.values(g)[0] ?? '')).join('\n');
+        if (/ALL PRIVILEGES|\bFILE\b|\bSUPER\b|\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i.test(text)) {
+          warnings.push(
+            'This MySQL account can write or administer data. SQLPilot runs every query in a read-only transaction, but a dedicated account with only SELECT is safer.',
+          );
+        }
+      } catch {
+        /* privilege advice is best effort */
+      }
       return {
         ok: true,
         latencyMs: Date.now() - start,
         serverVersion: String(rows[0]?.version ?? '') || null,
         error: null,
+        warnings,
       };
     } catch (error) {
       return { ok: false, latencyMs: null, serverVersion: null, error: cleanError(error) };
@@ -124,44 +138,139 @@ export class MysqlDriver implements SqlDriver {
     }
   }
 
+  /**
+   * Runs ONE statement in `START TRANSACTION READ ONLY` (enforced by the server: writes fail
+   * with error 1792). Rows are consumed as they stream in and reading stops at `maxRows + 1`;
+   * when that happens the connection is destroyed, which cancels the rest of the transfer, so
+   * a huge table is never buffered. `multipleStatements` is off at the pool level.
+   */
   async runQuery(sql: string, options: RunQueryOptions): Promise<QueryResult> {
     const conn = await this.pool.getConnection();
     const start = Date.now();
+    const timeoutMs = Math.max(1000, options.timeoutMs);
+    let discard = false;
     try {
-      await conn.query(`SET SESSION MAX_EXECUTION_TIME = ${Math.max(1000, options.timeoutMs)}`).catch(() => undefined);
-      if (!options.allowWrite) {
-        await conn.query('SET SESSION TRANSACTION READ ONLY').catch(() => undefined);
+      if (!options.allowWrite) assertReadShaped(sql);
+      await conn.query(`SET SESSION MAX_EXECUTION_TIME = ${Math.trunc(timeoutMs)}`).catch(() => undefined);
+      await conn.query(options.allowWrite ? 'START TRANSACTION' : 'START TRANSACTION READ ONLY');
+
+      const streamed = await streamRows(conn, sql, options.maxRows + 1, timeoutMs);
+      discard = streamed.abandoned;
+
+      const truncated = streamed.rows.length > options.maxRows;
+      const kept = truncated ? streamed.rows.slice(0, options.maxRows) : streamed.rows;
+      if (!discard) await conn.query(options.allowWrite ? 'COMMIT' : 'ROLLBACK');
+
+      if (streamed.affectedRows !== null && streamed.fields.length === 0) {
+        return {
+          columns: [{ name: 'changes', type: 'integer' }],
+          rows: [{ changes: streamed.affectedRows }],
+          returnedRows: 1,
+          totalRows: 1,
+          executionTimeMs: Date.now() - start,
+          truncated: false,
+          status: QueryStatus.SUCCESS,
+          historyId: null,
+        };
       }
-      const [rows, fields] = await conn.query<mysql.RowDataPacket[]>({ sql });
-      const rowArray = Array.isArray(rows) ? rows : [];
-      const truncated = rowArray.length > options.maxRows;
-      const limited = truncated ? rowArray.slice(0, options.maxRows) : rowArray;
-      const columns = (fields as mysql.FieldPacket[] | undefined)?.map((f) => ({
-        name: f.name,
-        type: mysqlTypeName(f.type),
-      })) ?? Object.keys(limited[0] ?? {}).map((name) => ({ name, type: null }));
+
+      const columns = streamed.fields.length
+        ? streamed.fields.map((f) => ({ name: f.name, type: mysqlTypeName(f.type) }))
+        : Object.keys(kept[0] ?? {}).map((name) => ({ name, type: null }));
+
+      let totalRows: number | null = truncated ? null : kept.length;
+      if (truncated && options.countTotal !== false && !options.allowWrite) {
+        totalRows = await this.countRows(sql, Math.min(timeoutMs, 5000));
+      }
       return {
         columns,
-        rows: limited.map((r) => normalizeRow(r as Record<string, unknown>)),
-        rowCount: limited.length,
-        totalRowCount: rowArray.length,
+        rows: kept.map((r) => normalizeRow(r)),
+        returnedRows: kept.length,
+        totalRows,
         executionTimeMs: Date.now() - start,
         truncated,
-        page: options.page,
-        pageSize: options.pageSize,
         status: QueryStatus.SUCCESS,
         historyId: null,
       };
     } catch (error) {
+      discard = true;
       throw toQueryError(error, Date.now() - start);
     } finally {
+      if (discard) conn.destroy();
+      else conn.release();
+    }
+  }
+
+  /** Bounded exact count on a separate read-only connection; null if it cannot be had quickly. */
+  private async countRows(sql: string, timeoutMs: number): Promise<number | null> {
+    let conn: mysql.PoolConnection | null = null;
+    try {
+      conn = await this.pool.getConnection();
+      await conn.query('START TRANSACTION READ ONLY');
+      const [rows] = await conn.query<mysql.RowDataPacket[]>({ sql: countSql(sql), timeout: timeoutMs });
+      await conn.query('ROLLBACK');
+      const n = Number(rows[0]?.total);
       conn.release();
+      return Number.isFinite(n) ? n : null;
+    } catch {
+      conn?.destroy();
+      return null;
     }
   }
 
   async close(): Promise<void> {
     await this.pool.end();
   }
+}
+
+interface StreamedRows {
+  rows: Array<Record<string, unknown>>;
+  fields: mysql.FieldPacket[];
+  affectedRows: number | null;
+  /** Reading stopped early; the connection still has unread data and must be destroyed. */
+  abandoned: boolean;
+}
+
+/** Collects at most `limit` rows from the wire, then stops. Rejects on error or client-side timeout. */
+function streamRows(conn: mysql.PoolConnection, sql: string, limit: number, timeoutMs: number): Promise<StreamedRows> {
+  return new Promise((resolve, reject) => {
+    const rows: Array<Record<string, unknown>> = [];
+    let fields: mysql.FieldPacket[] = [];
+    let affectedRows: number | null = null;
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    // Backstop for when MAX_EXECUTION_TIME does not apply (it only covers SELECT).
+    const timer = setTimeout(
+      () => finish(() => {
+        conn.destroy();
+        reject(new Error('Query execution was interrupted: timeout'));
+      }),
+      timeoutMs + 2000,
+    );
+
+    // `conn.connection` is the underlying event-emitting connection of the promise wrapper.
+    const query = (conn as unknown as { connection: CallbackConnection }).connection.query({ sql });
+    query.on('fields', (f: mysql.FieldPacket[]) => {
+      fields = f;
+    });
+    query.on('result', (row: Record<string, unknown> & { affectedRows?: number }) => {
+      if (settled) return;
+      if (fields.length === 0 && typeof row.affectedRows === 'number') {
+        affectedRows = row.affectedRows;
+        return;
+      }
+      rows.push(row);
+      if (rows.length >= limit) finish(() => resolve({ rows, fields, affectedRows, abandoned: true }));
+    });
+    query.on('error', (e: Error) => finish(() => reject(e)));
+    query.on('end', () => finish(() => resolve({ rows, fields, affectedRows, abandoned: false })));
+  });
 }
 
 function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {

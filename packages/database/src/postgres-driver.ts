@@ -1,6 +1,7 @@
 import { DatabaseType, QueryResult, QueryStatus, TableSchema, TestConnectionResult } from '@sqlpilot/shared';
-import { Pool } from 'pg';
-import { DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
+import { Pool, PoolClient } from 'pg';
+import Cursor from 'pg-cursor';
+import { assertReadShaped, countSql, DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
 
 export class PostgresDriver implements SqlDriver {
   readonly type = DatabaseType.POSTGRES;
@@ -24,11 +25,25 @@ export class PostgresDriver implements SqlDriver {
     const start = Date.now();
     try {
       const res = await this.pool.query('SELECT version() AS version');
+      const warnings: string[] = [];
+      try {
+        const role = await this.pool.query<{ rolsuper: boolean; rolcreaterole: boolean }>(
+          'SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user',
+        );
+        if (role.rows[0]?.rolsuper) {
+          warnings.push(
+            'This account is a PostgreSQL superuser. SQLPilot runs every query in a read-only transaction, but a dedicated read-only role (GRANT pg_read_all_data) is safer.',
+          );
+        }
+      } catch {
+        /* privilege advice is best effort */
+      }
       return {
         ok: true,
         latencyMs: Date.now() - start,
         serverVersion: String(res.rows[0]?.version ?? '').split(' ').slice(0, 2).join(' ') || null,
         error: null,
+        warnings,
       };
     } catch (error) {
       return { ok: false, latencyMs: null, serverVersion: null, error: cleanError(error) };
@@ -165,34 +180,107 @@ export class PostgresDriver implements SqlDriver {
     }
   }
 
+  /**
+   * Runs ONE statement inside an explicit transaction.
+   *
+   * Read-only mode uses `BEGIN READ ONLY`, which PostgreSQL itself enforces: DELETE, INSERT,
+   * CREATE, SELECT ... INTO, nextval() and friends all fail with "cannot execute ... in a
+   * read-only transaction". (`SET TRANSACTION READ ONLY` outside a transaction block is a
+   * no-op with a warning, which is what this driver used to rely on.)
+   *
+   * Rows are pulled through a cursor, `maxRows + 1` at most, so a huge table is never loaded.
+   * The extended protocol also refuses multi-statement strings.
+   */
   async runQuery(sql: string, options: RunQueryOptions): Promise<QueryResult> {
     const client = await this.pool.connect();
     const start = Date.now();
+    const timeoutMs = Math.max(1000, options.timeoutMs);
+    let destroy = false;
     try {
-      await client.query(`SET statement_timeout = ${Math.max(1000, options.timeoutMs)}`);
-      if (!options.allowWrite) await client.query('SET TRANSACTION READ ONLY');
-      const res = await client.query({ text: sql, rowMode: 'array' });
-      const fields = res.fields ?? [];
-      const allRows = (res.rows as unknown[][]) ?? [];
-      const truncated = allRows.length > options.maxRows;
-      const limited = truncated ? allRows.slice(0, options.maxRows) : allRows;
+      if (!options.allowWrite) assertReadShaped(sql);
+      await client.query(options.allowWrite ? 'BEGIN' : 'BEGIN READ ONLY');
+      // Setting the timeouts through a SELECT takes the transaction's first snapshot. After that
+      // PostgreSQL refuses `SET TRANSACTION READ WRITE`, so a read-only transaction cannot be
+      // flipped back (before the first snapshot it can).
+      await client.query('SELECT set_config($1, $2, true), set_config($3, $4, true)', [
+        'statement_timeout',
+        String(Math.trunc(timeoutMs)),
+        'idle_in_transaction_session_timeout',
+        String(Math.trunc(timeoutMs) + 5000),
+      ]);
+
+      const cursor = client.query(new Cursor(sql, [], { rowMode: 'array' }));
+      let rows: unknown[][];
+      let fields: Array<{ name: string; dataTypeID: number }>;
+      let affected: number | null;
+      try {
+        rows = (await cursor.read(options.maxRows + 1)) as unknown[][];
+        const meta = (cursor as unknown as { _result?: { fields?: typeof fields; rowCount?: number | null } })._result;
+        fields = meta?.fields ?? [];
+        affected = meta?.rowCount ?? null;
+      } finally {
+        await cursor.close().catch(() => undefined);
+      }
+
+      const truncated = rows.length > options.maxRows;
+      const kept = truncated ? rows.slice(0, options.maxRows) : rows;
+
+      let totalRows: number | null = truncated ? null : kept.length;
+      if (truncated && options.countTotal !== false && !options.allowWrite) {
+        totalRows = await this.countRows(client, sql, Math.min(timeoutMs, 5000));
+      }
+
+      // Read-only transactions are always rolled back; the editor's writes are committed.
+      await client.query(options.allowWrite ? 'COMMIT' : 'ROLLBACK');
+
+      if (fields.length === 0) {
+        // DML without RETURNING / utility command: report what changed.
+        return {
+          columns: [{ name: 'changes', type: 'integer' }],
+          rows: [{ changes: affected ?? 0 }],
+          returnedRows: 1,
+          totalRows: 1,
+          executionTimeMs: Date.now() - start,
+          truncated: false,
+          status: QueryStatus.SUCCESS,
+          historyId: null,
+        };
+      }
+
       const columns = fields.map((f) => ({ name: f.name, type: pgTypeName(f.dataTypeID) }));
+      const names = columns.map((c) => c.name);
       return {
         columns,
-        rows: limited.map((r) => rowToObject(columns.map((c) => c.name), r)),
-        rowCount: limited.length,
-        totalRowCount: res.rowCount ?? allRows.length,
+        rows: kept.map((r) => rowToObject(names, r)),
+        returnedRows: kept.length,
+        totalRows,
         executionTimeMs: Date.now() - start,
         truncated,
-        page: options.page,
-        pageSize: options.pageSize,
         status: QueryStatus.SUCCESS,
         historyId: null,
       };
     } catch (error) {
+      await client.query('ROLLBACK').catch(() => {
+        destroy = true; // the session is in an unknown state; do not return it to the pool
+      });
       throw toQueryError(error, Date.now() - start);
     } finally {
-      client.release();
+      client.release(destroy ? new Error('discarded after failed rollback') : undefined);
+    }
+  }
+
+  /** Bounded exact count inside the same READ ONLY transaction; null if it cannot be had quickly. */
+  private async countRows(client: PoolClient, sql: string, timeoutMs: number): Promise<number | null> {
+    try {
+      await client.query('SAVEPOINT sqlpilot_count');
+      await client.query(`SET LOCAL statement_timeout = ${Math.trunc(timeoutMs)}`);
+      const res = await client.query<{ total: string }>(countSql(sql));
+      await client.query('RELEASE SAVEPOINT sqlpilot_count');
+      const n = Number(res.rows[0]?.total);
+      return Number.isFinite(n) ? n : null;
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT sqlpilot_count').catch(() => undefined);
+      return null;
     }
   }
 

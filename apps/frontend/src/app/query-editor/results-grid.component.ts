@@ -1,6 +1,6 @@
-import { Component, computed, input, output, signal } from '@angular/core';
+import { Component, computed, input, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { toCsv, type QueryResult } from '@sqlpilot/shared';
+import { summarizeRows, toCsv, type QueryResult } from '@sqlpilot/shared';
 import { ToastService } from '../core/services/toast.service';
 import { inject } from '@angular/core';
 
@@ -14,9 +14,12 @@ type SortDir = 'asc' | 'desc' | null;
     @if (result(); as r) {
       <div class="flex h-full flex-col">
         <div class="flex flex-wrap items-center gap-3 border-b border-surface-border p-2 text-xs">
-          <span class="text-content-muted">
-            {{ r.rowCount }} row{{ r.rowCount === 1 ? '' : 's' }}
-            @if (r.truncated) { <span class="text-amber-500">(truncated at {{ r.pageSize }})</span> }
+          <span class="text-content-muted" data-testid="row-summary">
+            @if (summary().incomplete) {
+              <span class="text-amber-500">{{ summary().text }}</span>
+            } @else {
+              {{ summary().text }}
+            }
             · {{ r.executionTimeMs }} ms
           </span>
           <input
@@ -70,37 +73,22 @@ type SortDir = 'asc' | 'desc' | null;
           }
         </div>
 
-        @if (r.totalRowCount && r.totalRowCount > r.pageSize) {
-          <div class="flex items-center justify-between border-t border-surface-border p-2 text-xs">
-            <button
-              class="rounded-lg border border-surface-border px-2 py-1 disabled:opacity-40"
-              [disabled]="r.page <= 1"
-              (click)="pageChange.emit(r.page - 1)"
-            >
-              Prev
-            </button>
-            <span class="text-content-muted">Page {{ r.page }}</span>
-            <button
-              class="rounded-lg border border-surface-border px-2 py-1 disabled:opacity-40"
-              [disabled]="r.page * r.pageSize >= r.totalRowCount"
-              (click)="pageChange.emit(r.page + 1)"
-            >
-              Next
-            </button>
-          </div>
-        }
       </div>
     }
   `,
 })
 export class ResultsGridComponent {
   readonly result = input.required<QueryResult>();
-  readonly pageChange = output<number>();
 
   private readonly toast = inject(ToastService);
   readonly search = signal('');
   readonly sortKey = signal<string | null>(null);
   readonly sortDir = signal<SortDir>(null);
+
+  readonly summary = computed(() => {
+    const r = this.result();
+    return summarizeRows(r.returnedRows, r.totalRows, r.truncated);
+  });
 
   readonly viewRows = computed(() => {
     const r = this.result();

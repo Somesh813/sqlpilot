@@ -22,8 +22,11 @@ import { QueryHistoryService } from '../query-history/query-history.service';
 export interface ExecuteInput {
   sql: string;
   confirmed: boolean;
-  page?: number;
-  pageSize?: number;
+  /**
+   * Internal only (never exposed through a DTO). The AI path sets this so that model-written
+   * SQL is validated and executed read-only no matter how the connection is configured.
+   */
+  forceReadOnly?: boolean;
   prompt?: string;
   conversationId?: string;
   aiGenerated?: boolean;
@@ -50,8 +53,6 @@ export class QueryExecutionService {
     return validateSql(sql, {
       databaseType: connection.type,
       allowWrite: this.writeAllowed(connection.writeEnabled),
-      enforceLimit: true,
-      maxRows: this.config.get<number>('query.maxRows') ?? 1000,
     });
   }
 
@@ -64,14 +65,9 @@ export class QueryExecutionService {
     const connection = await this.connections.get(userId, connectionId);
     const maxRows = this.config.get<number>('query.maxRows') ?? 1000;
     const timeoutMs = this.config.get<number>('query.timeoutMs') ?? 15_000;
-    const defaultPageSize = this.config.get<number>('query.defaultPageSize') ?? 100;
+    const allowWrite = !input.forceReadOnly && this.writeAllowed(connection.writeEnabled);
 
-    const validation = validateSql(input.sql, {
-      databaseType: connection.type,
-      allowWrite: this.writeAllowed(connection.writeEnabled),
-      enforceLimit: true,
-      maxRows,
-    });
+    const validation = validateSql(input.sql, { databaseType: connection.type, allowWrite });
 
     if (!validation.valid) {
       await this.recordBlocked(userId, connection, input, validation);
@@ -86,16 +82,11 @@ export class QueryExecutionService {
       throw new ForbiddenException('The query must be reviewed and confirmed before execution.');
     }
 
-    if (
-      validation.statementKind === SqlStatementKind.WRITE &&
-      !this.writeAllowed(connection.writeEnabled)
-    ) {
+    if (validation.statementKind === SqlStatementKind.WRITE && !allowWrite) {
       await this.recordBlocked(userId, connection, input, validation);
       throw new ForbiddenException('Write queries are disabled for this connection.');
     }
 
-    const page = Math.max(1, input.page ?? 1);
-    const pageSize = Math.min(maxRows, Math.max(1, input.pageSize ?? defaultPageSize));
     const config = await this.connections.resolveDriverConfig(userId, connectionId);
 
     try {
@@ -103,8 +94,6 @@ export class QueryExecutionService {
         driver.runQuery(validation.normalizedSql, {
           timeoutMs,
           maxRows,
-          page,
-          pageSize,
           allowWrite: validation.statementKind === SqlStatementKind.WRITE,
         }),
       );
@@ -118,7 +107,7 @@ export class QueryExecutionService {
         sql: validation.normalizedSql,
         status: QueryStatus.SUCCESS,
         executionTimeMs: result.executionTimeMs,
-        rowCount: result.rowCount,
+        rowCount: result.returnedRows,
         truncated: result.truncated,
         aiGenerated: input.aiGenerated ?? false,
       });
@@ -129,7 +118,7 @@ export class QueryExecutionService {
         connectionId,
         requestId: ctx.requestId,
         ip: ctx.ip,
-        detail: { kind: validation.statementKind, rows: result.rowCount, ms: result.executionTimeMs },
+        detail: { kind: validation.statementKind, rows: result.returnedRows, truncated: result.truncated, ms: result.executionTimeMs },
       });
 
       return { ...result, historyId: entry.id };

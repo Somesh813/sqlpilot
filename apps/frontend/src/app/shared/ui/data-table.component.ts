@@ -1,5 +1,5 @@
 import { Component, computed, inject, input } from '@angular/core';
-import { toCsv } from '@sqlpilot/shared';
+import { summarizeRows, toCsv } from '@sqlpilot/shared';
 import { ToastService } from '../../core/services/toast.service';
 import { formatCell, humanizeHeader } from '../format-value';
 
@@ -50,13 +50,15 @@ import { formatCell, humanizeHeader } from '../format-value';
         </table>
       </div>
       <div class="flex items-center justify-between border-t border-surface-border bg-surface-1 px-3 py-1.5 text-xs text-content-muted">
-        <span>
-          @if (rows().length > maxRows()) {
-            Showing first {{ maxRows() }} of {{ total().toLocaleString() }} rows
+        <span data-testid="row-summary">
+          @if (summary().incomplete) {
+            <span class="text-amber-500">{{ summary().text }}</span>
           } @else {
-            {{ rows().length.toLocaleString() }} {{ rows().length === 1 ? 'row' : 'rows' }} returned
+            {{ summary().text }}
           }
-          @if (truncated()) { <span class="text-amber-500"> · result capped by the server row limit</span> }
+          @if (rows().length > maxRows()) {
+            <span data-testid="display-cap"> · Displaying the first {{ maxRows().toLocaleString() }} rows here; download the CSV for all {{ rows().length.toLocaleString() }}.</span>
+          }
         </span>
         <button class="rounded-md px-2 py-0.5 hover:bg-surface-2 hover:text-content-strong" (click)="download()">
           Download CSV
@@ -69,7 +71,7 @@ export class DataTableComponent {
   readonly columns = input.required<string[]>();
   readonly rows = input.required<Array<Record<string, unknown>>>();
   readonly numericColumns = input<string[]>([]);
-  readonly totalRowCount = input<number | null>(null);
+  readonly totalRows = input<number | null>(null);
   readonly truncated = input(false);
   readonly maxRows = input(200);
 
@@ -82,7 +84,7 @@ export class DataTableComponent {
   readonly cells = computed(() =>
     this.visibleRows().map((row) => this.columns().map((col) => formatCell(row[col], col, this.numeric()))),
   );
-  readonly total = computed(() => this.totalRowCount() ?? this.rows().length);
+  readonly summary = computed(() => summarizeRows(this.rows().length, this.totalRows(), this.truncated()));
 
   isNumeric(col: string): boolean {
     return this.numeric().has(col);

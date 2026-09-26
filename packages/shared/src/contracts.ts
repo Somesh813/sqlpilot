@@ -76,6 +76,8 @@ export interface TestConnectionResult {
   latencyMs: number | null;
   serverVersion: string | null;
   error: string | null;
+  /** Non-fatal advice, e.g. "this account is a superuser; use a read-only role". */
+  warnings?: string[];
 }
 
 /* ============================================================
@@ -146,8 +148,11 @@ export interface AskResponse {
   columns: string[];
   columnTypes: Record<string, string | null>;
   rows: Array<Record<string, unknown>>;
-  rowCount: number;
-  totalRowCount: number | null;
+  /** Rows in `rows` (never above the row cap). */
+  returnedRows: number;
+  /** Exact total when known; null when the result was truncated and could not be counted. */
+  totalRows: number | null;
+  /** True when the database had more rows than were returned. */
   truncated: boolean;
   executionTimeMs: number;
   resultType: ResultType;
@@ -232,8 +237,17 @@ export interface SqlValidationResult {
   hasLimit: boolean;
   stackedStatements: boolean;
   violations: SqlPolicyViolation[];
-  /** SQL after safe normalization (e.g. an injected LIMIT). */
+  /**
+   * The SQL that is both validated AND executed: comments removed, trailing `;` dropped.
+   * No LIMIT is ever appended; the row cap is enforced by the driver (fetch limit + 1).
+   */
   normalizedSql: string;
+  /** Lower-cased, unqualified names of every function called anywhere in the statement. */
+  functionsUsed: string[];
+  /** Literal top-level LIMIT, when the query has one. */
+  topLevelLimit: number | null;
+  /** `table.column` (or `null.column`) pairs the statement references, resolved through aliases. */
+  referencedColumns: string[];
 }
 
 export interface ValidateQueryRequest {
@@ -248,8 +262,6 @@ export interface ExecuteQueryRequest {
   confirmed: boolean;
   conversationId?: string;
   prompt?: string;
-  page?: number;
-  pageSize?: number;
   aiGenerated?: boolean;
 }
 
@@ -261,12 +273,13 @@ export interface QueryResultColumn {
 export interface QueryResult {
   columns: QueryResultColumn[];
   rows: Array<Record<string, unknown>>;
-  rowCount: number;
-  totalRowCount: number | null;
+  /** Rows actually in `rows` (never more than the row cap). */
+  returnedRows: number;
+  /** Exact number of matching rows when known; null when the result was cut off and not counted. */
+  totalRows: number | null;
   executionTimeMs: number;
+  /** True when the database had more rows than the cap (detected by fetching cap + 1). */
   truncated: boolean;
-  page: number;
-  pageSize: number;
   status: QueryStatus;
   historyId: string | null;
 }

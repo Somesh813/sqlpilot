@@ -80,12 +80,10 @@ describe('QueryExecutionService', () => {
       withDriver.mockResolvedValue({
         columns: [{ name: 'id', type: 'int' }],
         rows: [{ id: 1 }],
-        rowCount: 1,
-        totalRowCount: 1,
+        returnedRows: 1,
+        totalRows: 1,
         executionTimeMs: 5,
         truncated: false,
-        page: 1,
-        pageSize: 100,
         status: QueryStatus.SUCCESS,
         historyId: null,
       });
@@ -118,12 +116,10 @@ describe('QueryExecutionService', () => {
       withDriver.mockResolvedValue({
         columns: [],
         rows: [],
-        rowCount: 0,
-        totalRowCount: 0,
+        returnedRows: 0,
+        totalRows: 0,
         executionTimeMs: 3,
         truncated: false,
-        page: 1,
-        pageSize: 100,
         status: QueryStatus.SUCCESS,
         historyId: null,
       });
@@ -135,6 +131,44 @@ describe('QueryExecutionService', () => {
         {},
       );
       expect(withDriver).toHaveBeenCalled();
+    });
+
+    it('runs a SELECT read-only, passes the SQL through unchanged (no LIMIT appended), and lets the driver cap the rows', async () => {
+      const runQuery = jest.fn().mockResolvedValue({
+        columns: [{ name: 'id', type: 'int' }],
+        rows: [{ id: 1 }],
+        returnedRows: 1,
+        totalRows: 1,
+        executionTimeMs: 1,
+        truncated: false,
+        status: QueryStatus.SUCCESS,
+        historyId: null,
+      });
+      withDriver.mockImplementation((_cfg: unknown, fn: (d: unknown) => unknown) => fn({ runQuery }));
+
+      await service.execute('u1', 'conn1', { sql: 'SELECT id FROM customers -- note', confirmed: true }, {});
+
+      expect(runQuery).toHaveBeenCalledWith('SELECT id FROM customers', expect.objectContaining({ allowWrite: false, maxRows: 1000 }));
+    });
+
+    it('forceReadOnly (the AI path) refuses writes even on a write-enabled connection', async () => {
+      connections.get.mockResolvedValue({ ...connection, writeEnabled: true });
+      (config.get as jest.Mock) = jest.fn((key: string) => ({ 'query.maxRows': 1000, 'query.timeoutMs': 15000, 'query.allowWriteQueries': true } as Record<string, unknown>)[key]);
+      await expect(
+        service.execute('u1', 'conn1', { sql: 'DELETE FROM customers WHERE id = 1', confirmed: true, forceReadOnly: true }, {}),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(withDriver).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'SELECT * INTO copy_of_customers FROM customers',
+      'SELECT * FROM customers FOR UPDATE',
+      "SELECT pg_read_file('/etc/passwd')",
+      'SELECT 1; DROP TABLE customers',
+      'WITH d AS (DELETE FROM customers RETURNING *) SELECT * FROM d',
+    ])('never reaches the driver: %s', async (sql) => {
+      await expect(service.execute('u1', 'conn1', { sql, confirmed: true }, {})).rejects.toBeInstanceOf(BadRequestException);
+      expect(withDriver).not.toHaveBeenCalled();
     });
   });
 });

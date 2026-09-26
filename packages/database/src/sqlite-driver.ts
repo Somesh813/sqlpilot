@@ -1,7 +1,7 @@
 import { DatabaseType, QueryResult, QueryStatus, TableSchema, TestConnectionResult } from '@sqlpilot/shared';
 import BetterSqlite3 from 'better-sqlite3';
 import { existsSync } from 'node:fs';
-import { DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
+import { assertReadShaped, countSql, DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
 
 export class SqliteDriver implements SqlDriver {
   readonly type = DatabaseType.SQLITE;
@@ -118,28 +118,44 @@ export class SqliteDriver implements SqlDriver {
     const deadline = start + Math.max(1000, options.timeoutMs);
 
     try {
+      // Read-only access is enforced by the file handle itself (opened `readonly`), plus
+      // query_only, which also refuses temp-table writes.
+      if (!options.allowWrite) {
+        assertReadShaped(sql);
+        db.pragma('query_only = ON');
+      }
       const stmt = db.prepare(sql);
       if (stmt.reader) {
-        const rows = stmt.all() as Array<Record<string, unknown>>;
-        if (Date.now() > deadline) {
-          throw new DatabaseDriverError(
-            `Query exceeded the time limit (${Date.now() - start}ms).`,
-            null,
-            'TIMEOUT',
-          );
-        }
-        const truncated = rows.length > options.maxRows;
-        const limited = truncated ? rows.slice(0, options.maxRows) : rows;
+        // Pull at most maxRows + 1 rows; the extra one proves the result was cut off.
         const names = stmt.columns().map((c) => c.name);
+        const rows: Array<Record<string, unknown>> = [];
+        let truncated = false;
+        for (const row of stmt.iterate() as IterableIterator<Record<string, unknown>>) {
+          if (rows.length >= options.maxRows) {
+            truncated = true;
+            break;
+          }
+          rows.push(pick(names, row));
+        }
+        if (Date.now() > deadline) {
+          throw new DatabaseDriverError(`Query exceeded the time limit (${Date.now() - start}ms).`, null, 'TIMEOUT');
+        }
+        let totalRows: number | null = truncated ? null : rows.length;
+        if (truncated && options.countTotal !== false && !options.allowWrite) {
+          try {
+            const total = db.prepare(countSql(sql)).get() as { total: number | bigint } | undefined;
+            totalRows = total ? Number(total.total) : null;
+          } catch {
+            totalRows = null;
+          }
+        }
         return {
           columns: stmt.columns().map((c) => ({ name: c.name, type: c.type ?? null })),
-          rows: limited.map((r) => pick(names, r)),
-          rowCount: limited.length,
-          totalRowCount: rows.length,
+          rows,
+          returnedRows: rows.length,
+          totalRows,
           executionTimeMs: Date.now() - start,
           truncated,
-          page: options.page,
-          pageSize: options.pageSize,
           status: QueryStatus.SUCCESS,
           historyId: null,
         };
@@ -148,12 +164,10 @@ export class SqliteDriver implements SqlDriver {
       return {
         columns: [{ name: 'changes', type: 'integer' }],
         rows: [{ changes: info.changes }],
-        rowCount: 1,
-        totalRowCount: 1,
+        returnedRows: 1,
+        totalRows: 1,
         executionTimeMs: Date.now() - start,
         truncated: false,
-        page: options.page,
-        pageSize: options.pageSize,
         status: QueryStatus.SUCCESS,
         historyId: null,
       };

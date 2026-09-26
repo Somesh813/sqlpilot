@@ -59,14 +59,13 @@ import { DataTableComponent } from '../shared/ui/data-table.component';
               [columns]="response().columns"
               [rows]="response().rows"
               [numericColumns]="response().numericColumns"
-              [totalRowCount]="response().totalRowCount"
+              [totalRows]="response().totalRows"
               [truncated]="response().truncated"
             />
           }
         }
 
         <p class="text-xs text-content-muted">
-          {{ response().rowCount.toLocaleString() }} {{ response().rowCount === 1 ? 'row' : 'rows' }} returned ·
           {{ response().executionTimeMs }} ms
           @if (response().autoFixed) {
             · <span class="text-amber-500" title="The first query failed, so SQLPilot corrected it and ran it again">auto-corrected</span>
@@ -125,12 +124,10 @@ export class AnswerCardComponent implements OnInit {
     return {
       columns: r.columns.map((name) => ({ name, type: r.columnTypes[name] ?? null })),
       rows: r.rows,
-      rowCount: r.rowCount,
-      totalRowCount: r.totalRowCount,
+      returnedRows: r.returnedRows,
+      totalRows: r.totalRows,
       executionTimeMs: r.executionTimeMs,
       truncated: r.truncated,
-      page: 1,
-      pageSize: r.rowCount,
       status: 'SUCCESS' as never,
       historyId: r.historyId,
     };

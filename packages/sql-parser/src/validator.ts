@@ -1,203 +1,170 @@
 import {
-  DANGEROUS_SQL_KEYWORDS,
   DatabaseType,
   SqlPolicyViolation,
   SqlRiskLevel,
   SqlStatementKind,
   SqlValidationResult,
-  WRITE_DML_KEYWORDS,
 } from '@sqlpilot/shared';
 import { Parser } from 'node-sql-parser';
-import { classifyByAstType, classifyByKeyword, mergeKinds } from './classify';
+import { inspectAst } from './ast-inspect';
+import { classifyByAstType, classifyByKeyword } from './classify';
 import { toParserDialect } from './dialect';
-import { leadingKeyword, splitStatements, stripLiteralsAndComments } from './tokenize';
+import { lexSql } from './lexer';
+import { isDangerousFunction } from './policy';
+import { leadingKeyword } from './tokenize';
 
 export interface ValidateOptions {
   databaseType: DatabaseType;
-  /** connection.writeEnabled && global ALLOW_WRITE_QUERIES */
+  /**
+   * Allow ONE INSERT/UPDATE/DELETE (manual SQL editor with write mode enabled). Never set on
+   * the AI path. DDL, DCL, and every other statement stay blocked regardless.
+   */
   allowWrite: boolean;
-  /** Inject a LIMIT into limit-less SELECTs. */
-  enforceLimit: boolean;
-  maxRows: number;
 }
 
 const parser = new Parser();
 
-const LIMIT_PRESENT = /\blimit\s+\d+/i;
-const FETCH_PRESENT = /\bfetch\s+(first|next)\b/i;
-const LOCKING_READ = /\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b/i;
-const INTO_OUTFILE = /\binto\s+(outfile|dumpfile)\b/i;
+/** Root statement types that are legal when writes are allowed. */
+const WRITE_ROOTS = new Set(['insert', 'update', 'delete', 'replace']);
+
+/**
+ * Token-level backstops that run on the literal-blanked text. They exist so that an AST shape
+ * we did not anticipate cannot smuggle a construct past the walker.
+ */
+const CALL_TOKEN = /([A-Za-z_][A-Za-z0-9_$]*)\s*\(/g;
+const INTO_TOKEN = /\binto\b/i;
+const LOCK_TOKEN = /\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b/i;
 
 export function validateSql(rawSql: string, options: ValidateOptions): SqlValidationResult {
   const violations: SqlPolicyViolation[] = [];
-  const sql = rawSql.trim().replace(/;\s*$/, '');
-  const { stripped, hadBlockComment, hadLineComment } = stripLiteralsAndComments(sql);
+  const add = (code: string, message: string, keyword: string | null = null) => {
+    if (!violations.some((v) => v.code === code && v.keyword === keyword)) violations.push({ code, message, keyword });
+  };
 
-  const base: SqlValidationResult = {
+  const dialect = toParserDialect(options.databaseType);
+  const lexed = lexSql(rawSql ?? '', dialect);
+  const statements = lexed.statements;
+  const sql = statements[0] ?? '';
+
+  const result: SqlValidationResult = {
     valid: false,
     statementKind: SqlStatementKind.UNKNOWN,
     risk: SqlRiskLevel.MEDIUM,
     referencedTables: [],
     isReadOnly: false,
-    hasLimit: LIMIT_PRESENT.test(stripped) || FETCH_PRESENT.test(stripped),
-    stackedStatements: false,
+    hasLimit: false,
+    stackedStatements: statements.length > 1,
     violations,
     normalizedSql: sql,
+    functionsUsed: [],
+    topLevelLimit: null,
+    referencedColumns: [],
   };
 
-  if (!sql) {
-    violations.push({ code: 'EMPTY', message: 'Query is empty.', keyword: null });
-    return { ...base, risk: SqlRiskLevel.SAFE };
+  if (statements.length === 0) {
+    add('EMPTY', 'Query is empty.');
+    result.risk = SqlRiskLevel.SAFE;
+    return result;
   }
 
-  // --- Stacked statements ---
-  const statements = splitStatements(stripped);
+  if (lexed.unterminated) {
+    add('UNTERMINATED', 'The query has an unterminated string, identifier, or comment.');
+  }
   if (statements.length > 1) {
-    base.stackedStatements = true;
-    violations.push({
-      code: 'STACKED_STATEMENTS',
-      message: 'Multiple SQL statements are not allowed in a single request.',
-      keyword: null,
-    });
+    add('STACKED_STATEMENTS', 'Multiple SQL statements are not allowed in a single request.');
   }
 
-  // --- Keyword defense-in-depth (works even if AST parse fails) ---
-  const upperStripped = ` ${stripped.toUpperCase()} `;
-  const wordBoundary = (kw: string) => new RegExp(`(^|[^A-Z_])${kw}([^A-Z_]|$)`);
-  for (const kw of DANGEROUS_SQL_KEYWORDS) {
-    if (wordBoundary(kw).test(upperStripped)) {
-      violations.push({
-        code: 'DANGEROUS_KEYWORD',
-        message: `The keyword "${kw}" is not permitted.`,
-        keyword: kw,
-      });
-    }
+  // ---- parse (fail closed) ------------------------------------------------------------
+  let roots: unknown[] | null = null;
+  try {
+    const ast = parser.astify(sql, { database: dialect });
+    roots = Array.isArray(ast) ? ast : [ast];
+  } catch {
+    add('PARSE_FAILED', 'The query could not be parsed, so its safety cannot be verified.');
   }
-  if (!options.allowWrite) {
-    for (const kw of WRITE_DML_KEYWORDS) {
-      if (wordBoundary(kw).test(upperStripped)) {
-        pushOnce(violations, {
-          code: 'WRITE_DISABLED',
-          message: 'Write statements are disabled. An administrator must enable write mode for this connection.',
-          keyword: kw,
-        });
+
+  const keywordKind = classifyByKeyword(leadingKeyword(sql));
+  let kind = keywordKind;
+
+  if (roots) {
+    if (roots.length > 1) {
+      result.stackedStatements = true;
+      add('STACKED_STATEMENTS', 'Multiple SQL statements are not allowed in a single request.');
+    }
+    const facts = inspectAst(roots);
+    kind = classifyByAstType(facts.rootTypes[0]);
+    result.functionsUsed = facts.functions;
+    result.topLevelLimit = facts.topLevelLimit;
+    result.hasLimit = facts.topLevelLimit !== null;
+
+    const rootType = facts.rootTypes[0] ?? '';
+    const isSelect = rootType === 'select';
+    const isAllowedWrite = options.allowWrite && WRITE_ROOTS.has(rootType);
+
+    if (!isSelect && !isAllowedWrite) {
+      if (kind === SqlStatementKind.DDL) add('DDL_BLOCKED', 'Schema-changing statements (DDL) are never permitted.');
+      else if (kind === SqlStatementKind.DCL) add('DCL_BLOCKED', 'Permission statements (GRANT/REVOKE) are never permitted.');
+      else if (kind === SqlStatementKind.WRITE) {
+        add('WRITE_DISABLED', 'Write statements are disabled. An administrator must enable write mode for this connection.');
+      } else {
+        add('NON_QUERY_BLOCKED', 'Only SELECT queries are permitted. Transaction, session, and utility statements are blocked.');
       }
     }
-  }
-  if (INTO_OUTFILE.test(stripped)) {
-    violations.push({ code: 'FILE_WRITE', message: 'Writing query output to files is not permitted.', keyword: 'OUTFILE' });
-  }
-  if (LOCKING_READ.test(stripped)) {
-    violations.push({ code: 'LOCKING_READ', message: 'Locking reads (FOR UPDATE/SHARE) are not permitted.', keyword: 'FOR UPDATE' });
-  }
-
-  // --- AST analysis ---
-  let statementKind = SqlStatementKind.UNKNOWN;
-  let referencedTables: string[] = [];
-  let astParsed = false;
-
-  try {
-    const dialect = toParserDialect(options.databaseType);
-    const astResult = parser.astify(sql, { database: dialect });
-    const nodes = Array.isArray(astResult) ? astResult : [astResult];
-    astParsed = true;
-
-    if (nodes.length > 1 && !base.stackedStatements) {
-      base.stackedStatements = true;
-      violations.push({
-        code: 'STACKED_STATEMENTS',
-        message: 'Multiple SQL statements are not allowed in a single request.',
-        keyword: null,
-      });
+    for (const nested of facts.nestedStatements) {
+      add('NESTED_STATEMENT', `A nested ${nested.toUpperCase()} statement is not permitted.`, nested.toUpperCase());
     }
-
-    statementKind = mergeKinds(nodes.map((n) => classifyByAstType((n as { type?: string }).type)));
+    if (facts.hasInto) add('SELECT_INTO', 'SELECT ... INTO (creating tables, variables, or files) is not permitted.', 'INTO');
+    if (facts.hasLocking) add('LOCKING_READ', 'Locking reads (FOR UPDATE / FOR SHARE) are not permitted.', 'FOR UPDATE');
+    for (const fn of facts.dangerousFunctions) {
+      add('DANGEROUS_FUNCTION', `The function "${fn}" is not permitted.`, fn);
+    }
 
     try {
-      const tableList = parser.tableList(sql, { database: dialect });
-      referencedTables = Array.from(
-        new Set(tableList.map((entry) => entry.split('::').pop() || entry).filter(Boolean)),
+      const withoutCtes = new Set(facts.cteNames);
+      result.referencedTables = Array.from(
+        new Set(
+          parser
+            .tableList(sql, { database: dialect })
+            .map((entry) => entry.split('::').pop() || entry)
+            .filter((t) => t && !withoutCtes.has(t.toLowerCase())),
+        ),
+      );
+      result.referencedColumns = Array.from(
+        new Set(parser.columnList(sql, { database: dialect }).map((entry) => entry.split('::').slice(1).join('.'))),
       );
     } catch {
-      /* tableList can throw on exotic syntax; non-fatal */
+      /* table/column extraction is advisory; the policy checks above do not depend on it */
     }
-  } catch {
-    // Fall back to keyword classification.
-    statementKind = mergeKinds(statements.map((s) => classifyByKeyword(leadingKeyword(s))));
-    if (statementKind === SqlStatementKind.UNKNOWN) {
-      violations.push({
-        code: 'PARSE_FAILED',
-        message: 'The query could not be parsed and its safety cannot be verified.',
-        keyword: null,
-      });
-    }
+  } else {
+    // Unparseable: nothing was inspected, so report what the leading keyword says and stay invalid.
+    if (kind === SqlStatementKind.DDL) add('DDL_BLOCKED', 'Schema-changing statements (DDL) are never permitted.');
+    if (kind === SqlStatementKind.DCL) add('DCL_BLOCKED', 'Permission statements (GRANT/REVOKE) are never permitted.');
   }
 
-  if (statementKind === SqlStatementKind.UNKNOWN) {
-    statementKind = mergeKinds(statements.map((s) => classifyByKeyword(leadingKeyword(s))));
+  // ---- token backstops (independent of the AST) -----------------------------------------
+  const code = lexed.code;
+  if (INTO_TOKEN.test(code) && kind === SqlStatementKind.READ) {
+    add('SELECT_INTO', 'SELECT ... INTO (creating tables, variables, or files) is not permitted.', 'INTO');
+  }
+  if (LOCK_TOKEN.test(code)) add('LOCKING_READ', 'Locking reads (FOR UPDATE / FOR SHARE) are not permitted.', 'FOR UPDATE');
+  for (const m of code.matchAll(CALL_TOKEN)) {
+    const name = m[1].toLowerCase();
+    if (isDangerousFunction(name)) add('DANGEROUS_FUNCTION', `The function "${name}" is not permitted.`, name);
   }
 
-  base.statementKind = statementKind;
-  base.referencedTables = referencedTables;
-  base.isReadOnly = statementKind === SqlStatementKind.READ;
-
-  // --- Policy: statement kind ---
-  if (statementKind === SqlStatementKind.DDL) {
-    pushOnce(violations, { code: 'DDL_BLOCKED', message: 'Schema-changing statements (DDL) are never permitted.', keyword: null });
-  }
-  if (statementKind === SqlStatementKind.DCL) {
-    pushOnce(violations, { code: 'DCL_BLOCKED', message: 'Permission statements (GRANT/REVOKE) are never permitted.', keyword: null });
-  }
-  if (statementKind === SqlStatementKind.WRITE && !options.allowWrite) {
-    pushOnce(violations, {
-      code: 'WRITE_DISABLED',
-      message: 'Write statements are disabled. An administrator must enable write mode for this connection.',
-      keyword: null,
-    });
-  }
-  if (statementKind === SqlStatementKind.TRANSACTION || statementKind === SqlStatementKind.UTILITY) {
-    pushOnce(violations, {
-      code: 'NON_QUERY_BLOCKED',
-      message: 'Transaction control and session/utility statements are not permitted.',
-      keyword: null,
-    });
-  }
-
-  // --- LIMIT enforcement for reads ---
-  if (options.enforceLimit && base.isReadOnly && !base.hasLimit && !base.stackedStatements) {
-    base.normalizedSql = `${sql}\nLIMIT ${options.maxRows}`;
-    base.hasLimit = true;
-  }
-
-  // --- Comment warnings (non-blocking) ---
-  if (hadBlockComment || hadLineComment) {
-    // informational only — recorded as a low-risk violation entry for the UI
-  }
-
-  base.valid = violations.length === 0;
-  base.risk = computeRisk(statementKind, violations, base);
-
-  return base;
+  result.statementKind = kind;
+  result.isReadOnly = kind === SqlStatementKind.READ && violations.length === 0;
+  result.valid = violations.length === 0;
+  result.risk = computeRisk(kind, violations, result);
+  return result;
 }
 
-function pushOnce(list: SqlPolicyViolation[], violation: SqlPolicyViolation): void {
-  if (!list.some((v) => v.code === violation.code)) list.push(violation);
-}
-
-function computeRisk(
-  kind: SqlStatementKind,
-  violations: SqlPolicyViolation[],
-  result: SqlValidationResult,
-): SqlRiskLevel {
-  if (violations.some((v) => ['DDL_BLOCKED', 'DCL_BLOCKED', 'STACKED_STATEMENTS', 'FILE_WRITE'].includes(v.code))) {
-    return SqlRiskLevel.CRITICAL;
-  }
-  if (violations.some((v) => v.code === 'DANGEROUS_KEYWORD' || v.code === 'WRITE_DISABLED')) {
-    return SqlRiskLevel.HIGH;
-  }
+function computeRisk(kind: SqlStatementKind, violations: SqlPolicyViolation[], r: SqlValidationResult): SqlRiskLevel {
+  const codes = new Set(violations.map((v) => v.code));
+  const critical = ['DDL_BLOCKED', 'DCL_BLOCKED', 'STACKED_STATEMENTS', 'NESTED_STATEMENT', 'SELECT_INTO', 'DANGEROUS_FUNCTION'];
+  if (critical.some((c) => codes.has(c))) return SqlRiskLevel.CRITICAL;
+  if (codes.has('WRITE_DISABLED') || codes.has('LOCKING_READ') || codes.has('NON_QUERY_BLOCKED')) return SqlRiskLevel.HIGH;
   if (kind === SqlStatementKind.WRITE) return SqlRiskLevel.HIGH;
-  if (violations.some((v) => v.code === 'PARSE_FAILED')) return SqlRiskLevel.MEDIUM;
-  if (kind === SqlStatementKind.READ && result.hasLimit) return SqlRiskLevel.SAFE;
-  if (kind === SqlStatementKind.READ) return SqlRiskLevel.LOW;
-  return SqlRiskLevel.MEDIUM;
+  if (codes.size > 0) return SqlRiskLevel.MEDIUM;
+  return r.hasLimit ? SqlRiskLevel.SAFE : SqlRiskLevel.LOW;
 }

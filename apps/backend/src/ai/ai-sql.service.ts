@@ -69,8 +69,6 @@ export class AiSqlService {
       : validateSql(data.sql, {
           databaseType: connection.type,
           allowWrite: false,
-          enforceLimit: false,
-          maxRows: this.config.get<number>('query.maxRows') ?? 1000,
         });
 
     const warnings = [...data.warnings];

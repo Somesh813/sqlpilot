@@ -113,7 +113,7 @@ describe('Query execution (e2e)', () => {
       .set(auth())
       .send({ connectionId, sql: 'SELECT name, spend FROM customers ORDER BY spend DESC', confirmed: true })
       .expect(200);
-    expect(res.body.rowCount).toBe(3);
+    expect(res.body.returnedRows).toBe(3);
     expect(res.body.rows[0].name).toBe('Grace');
     expect(res.body.historyId).toBeTruthy();
   });
