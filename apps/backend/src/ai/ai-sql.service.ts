@@ -169,10 +169,10 @@ export class AiSqlService {
     question: string,
     columns: string[],
     rows: Array<Record<string, unknown>>,
-    totalRowCount: number,
+    scope: { returnedRows: number; totalRows: number | null; truncated: boolean },
   ): Promise<string | null> {
     try {
-      const messages = buildResultSummaryMessages({ question, columns, rows, totalRowCount });
+      const messages = buildResultSummaryMessages({ question, columns, rows, ...scope });
       const { data } = await this.ai.completeStructured(
         { messages, temperature: 0.2, model: this.fastModel() },
         resultAnswerSchema,

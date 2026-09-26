@@ -7,6 +7,9 @@ import {
 } from '@nestjs/common';
 import {
   analyzeResult,
+  buildResultFacts,
+  deterministicAnswer,
+  verifyAnswer,
   AskRequest,
   AskResponse,
   ConversationMessageRole,
@@ -135,10 +138,7 @@ export class AskService {
     // ---- 3. decide how to show it, then say it in words ----
     const columns = result.columns.map((c) => c.name);
     const analysis = this.analyze(columns, result.rows, generated);
-    const totalRowCount = result.totalRows ?? result.returnedRows;
-    const answer =
-      (await this.ai.summarize(question, columns, result.rows, totalRowCount)) ??
-      this.describe(columns, result.rows, totalRowCount, analysis);
+    const answer = await this.answer(question, columns, result, analysis);
 
     const response: AskResponse = {
       ...base,
@@ -198,18 +198,39 @@ export class AskService {
     }
   }
 
-  /** Deterministic answer used only if the AI summary is unavailable. */
-  private describe(
+  /**
+   * SQL -> database -> structured result -> deterministic facts -> model wording -> verify.
+   * The model may only reword what the facts say; an answer that contradicts the data is
+   * replaced by the deterministic one, so a wrong count never reaches the user.
+   */
+  private async answer(
+    question: string,
     columns: string[],
-    rows: Array<Record<string, unknown>>,
-    total: number,
+    result: QueryResult,
     analysis: ResultAnalysis,
-  ): string {
-    if (rows.length === 0) return 'No matching records were found.';
-    if (analysis.resultType === 'single_value' && columns.length === 1) {
-      return `The result is ${formatNumber(rows[0][columns[0]])}.`;
-    }
-    return `Found ${total.toLocaleString('en-US')} ${total === 1 ? 'row' : 'rows'}.`;
+  ): Promise<string> {
+    const facts = buildResultFacts({
+      columns,
+      rows: result.rows,
+      returnedRows: result.returnedRows,
+      totalRows: result.totalRows,
+      truncated: result.truncated,
+      analysis,
+    });
+    const fallback = deterministicAnswer(facts);
+    if (facts.isEmpty) return fallback; // nothing for a model to add
+
+    const wording = await this.ai.summarize(question, columns, result.rows, {
+      returnedRows: result.returnedRows,
+      totalRows: result.totalRows,
+      truncated: result.truncated,
+    });
+    if (!wording) return fallback;
+
+    const check = verifyAnswer(wording, facts, question);
+    if (check.ok) return wording;
+    this.logger.warn(`Rejected AI answer (${check.problems.join(', ')}); using the deterministic answer.`);
+    return fallback;
   }
 
   private async fail(
@@ -295,9 +316,4 @@ export class AskService {
       error: null,
     };
   }
-}
-
-function formatNumber(value: unknown): string {
-  const n = Number(value);
-  return Number.isFinite(n) ? n.toLocaleString('en-US', { maximumFractionDigits: 2 }) : String(value);
 }

@@ -47,6 +47,8 @@ class ScriptedProvider implements AiProvider {
   generated: unknown[] = [];
   fixes: unknown[] = [];
   answerFails = false;
+  /** Scripted answer wordings, consumed in order (default: a neutral sentence with no claims). */
+  answers: string[] = [];
   /** Scripted follow-up classifier verdicts, consumed in order (default: not a follow-up). */
   followUps: boolean[] = [];
   classifierFails = false;
@@ -74,7 +76,7 @@ class ScriptedProvider implements AiProvider {
     }
     else if (name === 'result_answer') {
       if (this.answerFails) throw new Error('summary model down');
-      data = { answer: 'Stub answer from the actual rows.' };
+      data = { answer: this.answers.shift() ?? 'Stub answer from the actual rows.' };
     }
     if (data === undefined) throw new Error(`no scripted output for ${name}`);
     return { data: data as T, model: 'scripted', usage: null, raw: '' };
@@ -166,6 +168,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
 
   it('"How many customers?" → real count, KPI, answer, no chart', async () => {
     provider.generated = [gen('SELECT COUNT(*) AS total_customers FROM customers')];
+    provider.answers = ['There are 4 customers.'];
     const res = await ask('How many customers are there?').expect(200);
     expect(res.body).toMatchObject({
       success: true,
@@ -173,7 +176,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
       rows: [{ total_customers: 4 }],
       returnedRows: 1,
       resultType: 'single_value',
-      explanation: 'Stub answer from the actual rows.',
+      explanation: 'There are 4 customers.',
     });
     expect(res.body.visualization.type).toBe('kpi');
     expect(res.body.sql).toContain('COUNT');
@@ -252,7 +255,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     provider.generated = [gen('SELECT COUNT(*) AS total_customers FROM customers')];
     const res = await ask('How many customers?').expect(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.explanation).toBe('The result is 4.');
+    expect(res.body.explanation).toBe('Total customers: 4.');
     expect(res.body.rows).toEqual([{ total_customers: 4 }]);
   });
 
@@ -292,6 +295,39 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     provider.generated = [gen("UPDATE customers SET name = 'x'")];
     const res = await ask('Rename everyone').expect(200);
     expect(res.body.success).toBe(false);
+  });
+
+  it('F9: a model answer that contradicts the data (COUNT = 4 said as 2) is replaced by the true one', async () => {
+    provider.generated = [gen('SELECT COUNT(*) AS total_customers FROM customers')];
+    provider.answers = ['There are 2 customers.'];
+    const res = await ask('How many customers are there?').expect(200);
+    expect(res.body.rows).toEqual([{ total_customers: 4 }]);
+    expect(res.body.explanation).toBe('Total customers: 4.');
+    expect(res.body.explanation).not.toMatch(/2/);
+  });
+
+  it('F9: "no matching records" is never shown when rows came back', async () => {
+    provider.generated = [gen("SELECT name, city FROM customers WHERE city = 'Pune'")];
+    provider.answers = ['No matching records were found.'];
+    const res = await ask('Filter those to Pune').expect(200);
+    expect(res.body.returnedRows).toBe(1);
+    expect(res.body.explanation).not.toMatch(/no matching/i);
+    expect(res.body.explanation).toContain('Linus');
+  });
+
+  it('F9: a grounded model answer is kept as written', async () => {
+    provider.generated = [gen("SELECT name, city FROM customers WHERE city = 'Mumbai' ORDER BY name")];
+    provider.answers = ['Two customers are in Mumbai: Ada and Grace.'];
+    const res = await ask('Show customers from Mumbai').expect(200);
+    expect(res.body.explanation).toBe('Two customers are in Mumbai: Ada and Grace.');
+  });
+
+  it('an empty result gets the deterministic sentence without asking the model', async () => {
+    provider.generated = [gen("SELECT name FROM customers WHERE city = 'Atlantis'")];
+    const before = provider.calls.length;
+    const res = await ask('Customers in Atlantis').expect(200);
+    expect(res.body.explanation).toBe('No matching records were found.');
+    expect(provider.calls.slice(before).map((c) => c.name)).not.toContain('result_answer');
   });
 
   it('question the schema cannot answer → clear message, no query run', async () => {

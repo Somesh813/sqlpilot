@@ -125,9 +125,19 @@ export function buildResultSummaryMessages(params: {
   question: string;
   columns: string[];
   rows: Array<Record<string, unknown>>;
-  totalRowCount: number;
+  /** Rows actually returned by the database. */
+  returnedRows: number;
+  /** Exact total when known. */
+  totalRows: number | null;
+  /** The database had more rows than were returned. */
+  truncated: boolean;
 }): AiMessage[] {
   const sample = params.rows.slice(0, 25);
+  const scope = params.truncated
+    ? params.totalRows !== null
+      ? `PARTIAL result: ${params.returnedRows} of ${params.totalRows} rows. Do not describe totals, sums or averages as if they covered all ${params.totalRows} rows.`
+      : `PARTIAL result: the first ${params.returnedRows} rows; more exist. Do not call anything a total, and do not sum or average across the rows.`
+    : `COMPLETE result: exactly ${params.returnedRows} ${params.returnedRows === 1 ? 'row' : 'rows'}.`;
   return [
     {
       role: 'system',
@@ -137,12 +147,13 @@ export function buildResultSummaryMessages(params: {
         'Use thousands separators for large numbers. Write money without inventing a currency symbol.',
         'For a single value, state it directly (e.g. "There are 1,250 customers."). For lists, name the top items and the overall picture.',
         'If no rows were returned, say no matching records were found.',
-        'Never invent or estimate values that are not in the data.',
+        'Never invent or estimate values that are not in the data. Every number you write must appear in the data or be a simple count, difference or percentage of it.',
+        'The result scope line is authoritative. If rows are present, never say no records were found.',
       ].join('\n'),
     },
     {
       role: 'user',
-      content: `Question: ${params.question}\n\nColumns: ${params.columns.join(', ')}\nTotal rows: ${params.totalRowCount}\nFirst ${sample.length} rows (JSON):\n${JSON.stringify(sample)}`,
+      content: `Question: ${params.question}\n\nColumns: ${params.columns.join(', ')}\nResult scope: ${scope}\nShowing ${sample.length} rows to you (JSON):\n${JSON.stringify(sample)}`,
     },
   ];
 }

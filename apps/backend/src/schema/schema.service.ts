@@ -6,6 +6,7 @@ import {
   ConnectionStatus,
   DatabaseSchemaSnapshot,
   SchemaContext,
+  selectSchemaTables,
 } from '@sqlpilot/shared';
 import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
@@ -86,9 +87,8 @@ export class SchemaService {
   }
 
   /**
-   * Builds a compact SchemaContext for the AI, limited to `maxTables` most
-   * relevant tables. Relevance = tables whose name or a column name matches a
-   * keyword in `question`, plus tables they have relationships with.
+   * Builds the SchemaContext for the AI. Small schemas are sent whole; larger ones are
+   * narrowed by meaning and connected through the foreign-key graph (see selectSchemaTables).
    */
   async buildContext(
     userId: string,
@@ -97,39 +97,10 @@ export class SchemaService {
     maxTables: number,
   ): Promise<SchemaContext> {
     const snapshot = await this.get(userId, connectionId);
-    const keywords = tokenize(question);
-
-    const scored = snapshot.tables.map((table) => {
-      let score = 0;
-      const haystack = `${table.name} ${table.columns.map((c) => c.name).join(' ')}`.toLowerCase();
-      for (const kw of keywords) if (haystack.includes(kw)) score += kw.length > 4 ? 3 : 1;
-      if (/^(id|name|created_at|updated_at)$/i.test(table.name)) score -= 1;
-      return { table, score };
-    });
-
-    let chosen = scored
-      .filter((s) => s.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .map((s) => s.table.name);
-
-    // Pull in directly related tables.
-    const related = new Set(chosen);
-    for (const rel of snapshot.relationships) {
-      if (related.has(rel.fromTable)) related.add(rel.toTable);
-      if (related.has(rel.toTable)) related.add(rel.fromTable);
-    }
-    chosen = Array.from(related);
-
-    // If nothing matched, fall back to the largest / most-connected tables.
-    if (chosen.length === 0) {
-      chosen = snapshot.tables.map((t) => t.name).slice(0, maxTables);
-    }
-
-    const includedNames = new Set(chosen.slice(0, maxTables));
+    const selection = selectSchemaTables(snapshot.tables, snapshot.relationships, question, { maxTables });
+    const includedNames = new Set(selection.tables);
     const tables = snapshot.tables.filter((t) => includedNames.has(t.name));
-    const omittedTables = snapshot.tables
-      .filter((t) => !includedNames.has(t.name))
-      .map((t) => t.name);
+    const omittedTables = selection.omitted;
 
     return {
       databaseType: snapshot.databaseType,
@@ -158,21 +129,3 @@ export class SchemaService {
     };
   }
 }
-
-function tokenize(text: string): string[] {
-  return Array.from(
-    new Set(
-      text
-        .toLowerCase()
-        .replace(/[^a-z0-9_\s]/g, ' ')
-        .split(/\s+/)
-        .filter((w) => w.length > 2 && !STOP_WORDS.has(w)),
-    ),
-  );
-}
-
-const STOP_WORDS = new Set([
-  'the', 'and', 'for', 'with', 'this', 'that', 'from', 'show', 'find', 'list', 'get', 'all',
-  'how', 'many', 'much', 'what', 'which', 'who', 'top', 'per', 'each', 'give', 'last', 'first',
-  'total', 'count', 'sum', 'average', 'avg', 'group', 'order', 'sort', 'between', 'over', 'under',
-]);

@@ -1,5 +1,5 @@
 import { Component, OnInit, computed, inject, input, output, signal } from '@angular/core';
-import { VisualizationType, type AskResponse, type QueryResult } from '@sqlpilot/shared';
+import { summarizeRows, VisualizationType, type AskResponse, type QueryResult } from '@sqlpilot/shared';
 import { ChartComponent } from '../analytics/chart.component';
 import { ToastService } from '../core/services/toast.service';
 import { formatCell, humanizeHeader } from '../shared/format-value';
@@ -65,6 +65,9 @@ import { DataTableComponent } from '../shared/ui/data-table.component';
           }
         }
 
+        @if (rowSummary().incomplete) {
+          <p class="text-xs text-amber-500" data-testid="truncation-notice">⚠ {{ rowSummary().text }}</p>
+        }
         <p class="text-xs text-content-muted">
           {{ response().executionTimeMs }} ms
           @if (response().autoFixed) {
@@ -116,6 +119,10 @@ export class AnswerCardComponent implements OnInit {
   readonly chartViews = computed<VisualizationType[]>(() =>
     this.response().availableViews.filter((v) => v !== VisualizationType.TABLE && v !== VisualizationType.KPI),
   );
+  readonly rowSummary = computed(() => {
+    const r = this.response();
+    return summarizeRows(r.returnedRows, r.totalRows, r.truncated);
+  });
   readonly isChart = computed(() => this.view() !== VisualizationType.TABLE);
 
   /** Adapter so the shared chart component can draw an AskResponse. */

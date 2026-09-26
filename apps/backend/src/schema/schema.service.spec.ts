@@ -49,9 +49,16 @@ describe('SchemaService.buildContext', () => {
     return service;
   }
 
-  it('selects tables relevant to the question plus their related tables', async () => {
+  it('sends the complete schema when it is small enough to fit', async () => {
     const service = makeService();
     const ctx = await service.buildContext('u1', 'c1', 'total spending per customer', 10);
+    expect(ctx.tables.map((t) => t.name).sort()).toEqual(['audit_logs', 'customers', 'orders', 'products']);
+    expect(ctx.omittedTables).toEqual([]);
+  });
+
+  it('selects tables relevant to the question plus their related tables', async () => {
+    const service = makeService();
+    const ctx = await service.buildContext('u1', 'c1', 'total spending per customer', 3);
     const names = ctx.tables.map((t) => t.name).sort();
     expect(names).toContain('customers');
     expect(names).toContain('orders');

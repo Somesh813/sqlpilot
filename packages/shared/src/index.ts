@@ -5,3 +5,5 @@ export * from './contracts';
 export * from './utils';
 export * from './analysis';
 export * from './row-summary';
+export * from './schema-select';
+export * from './answer-facts';
