@@ -17,6 +17,11 @@ export interface AppConfig {
     provider: 'openai' | 'groq';
     timeoutMs: number;
     maxSchemaTables: number;
+    /**
+     * Whether a scrubbed sample of result rows may be sent to the model to word the answer.
+     * false = the answer is built locally from facts and no row value leaves the server.
+     */
+    sendRowValues: boolean;
     /** See OpenAiProviderOptions.structuredOutputMode. */
     structuredOutputMode: 'json_schema' | 'json_object';
     openai: {
@@ -84,6 +89,7 @@ export default (): AppConfig => ({
     provider: (process.env.AI_PROVIDER as 'openai' | 'groq' | undefined) ?? 'openai',
     timeoutMs: parseInt(process.env.AI_REQUEST_TIMEOUT_MS ?? '45000', 10),
     maxSchemaTables: parseInt(process.env.AI_MAX_SCHEMA_TABLES ?? String(DEFAULTS.AI_MAX_SCHEMA_TABLES), 10),
+    sendRowValues: (process.env.AI_SEND_ROW_VALUES ?? 'true').toLowerCase() !== 'false',
     structuredOutputMode:
       (process.env.AI_STRUCTURED_OUTPUT_MODE as 'json_schema' | 'json_object' | undefined) ?? 'json_schema',
     openai: {

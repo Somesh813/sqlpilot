@@ -115,6 +115,12 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
       CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id),
                            total REAL, status TEXT, created_at TEXT);
     `);
+    db.exec(`
+      CREATE TABLE accounts (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, api_token TEXT, plan TEXT);
+      INSERT INTO accounts (username, password_hash, api_token, plan) VALUES
+        ('ada', '$2b$12$abcdefghijklmnopqrstuv', 'tok_live_ABCDEFGHIJKLMNOP1234', 'pro'),
+        ('grace', '$2b$12$zyxwvutsrqponmlkjihgfe', 'tok_live_QRSTUVWXYZ9876543210', 'free');
+    `);
     db.exec(`INSERT INTO customers (name, city, email) VALUES
       ('Ada','Mumbai','ada@x.com'),('Grace','Mumbai','grace@x.com'),('Linus','Pune','linus@x.com'),
       ('Alan','Delhi','alan@x.com')`);
@@ -342,10 +348,56 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     expect(provider.calls.slice(before).map((c) => c.name)).not.toContain('result_answer');
   });
 
+  describe('F15: what is sent to the model', () => {
+    const lastCall = (name: string) => [...provider.calls].reverse().find((c) => c.name === name)!;
+    const promptText = (name: string) => lastCall(name).messages.map((m) => m.content).join('\n---\n');
+
+    it('the SQL model is never shown secret-holding columns, so it cannot select them', async () => {
+      provider.generated = [gen('SELECT username, plan FROM accounts')];
+      await ask('Which plan is each account on?').expect(200);
+      const prompt = promptText('generated_sql');
+      expect(prompt).toContain('accounts');
+      expect(prompt).toContain('username');
+      expect(prompt).not.toMatch(/password_hash|api_token/);
+    });
+
+    it('SELECT * on a table with secrets: the user sees the real rows, the answer model does not', async () => {
+      provider.generated = [gen('SELECT * FROM accounts')];
+      provider.answers = ['There are 2 accounts.'];
+      const res = await ask('Show all accounts').expect(200);
+      expect(res.body.rows[0].password_hash).toMatch(/^\$2b\$/); // the user's own data is untouched
+      const sent = promptText('result_answer');
+      expect(sent).not.toMatch(/\$2b\$|tok_live|password_hash|api_token/);
+      expect(sent).toContain('ada');
+    });
+
+    it('contact details are shown to the user but only placeholders reach the answer model', async () => {
+      provider.generated = [gen('SELECT name, email FROM customers ORDER BY name')];
+      const res = await ask('List customers with their email').expect(200);
+      expect(res.body.rows[0].email).toBe('ada@x.com');
+      const sent = promptText('result_answer');
+      expect(sent).not.toMatch(/@x\.com/);
+      expect(sent).toContain('[hidden]');
+    });
+
+    it('a follow-up sends the earlier SQL but never the earlier answer (which quotes result data)', async () => {
+      provider.generated = [gen("SELECT name, city FROM customers WHERE city = 'Mumbai'")];
+      provider.answers = ['Ada and Grace live in Mumbai.'];
+      const first = await ask('Show customers from Mumbai').expect(200);
+      provider.followUps = [true];
+      provider.generated = [gen("SELECT name FROM customers WHERE city = 'Mumbai' LIMIT 1")];
+      await ask('Only the first one', first.body.conversationId).expect(200);
+      const prompt = promptText('generated_sql');
+      expect(prompt).toContain("WHERE city = 'Mumbai'"); // the query is what a refinement needs
+      expect(prompt).not.toContain('Ada and Grace live in Mumbai');
+    });
+  });
+
+
   describe('F11/F12: failures are safe for users and never leak internals', () => {
     const LEAKY_429 =
       'groq request failed (429): 429 Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01abcXYZ789` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 7900. Please try again in 2.5s.';
-    const FORBIDDEN = /org_01abcXYZ789|groq|gpt-oss|on_demand|Limit 8000|tokens per minute|stack|\bat\s+\S+\s+\(|[A-Z]:\|\/home\/|\/etc\/|ECONN|password/i;
+    const FORBIDDEN = /org_01abcXYZ789|groq|gpt-oss|on_demand|Limit 8000|tokens per minute|stack|\bat\s+\S+\s+\(|[A-Z]:\\|\/home\/|\/etc\/|ECONN|password/i;
 
     let adminToken: string;
     let adminConnectionId: string;

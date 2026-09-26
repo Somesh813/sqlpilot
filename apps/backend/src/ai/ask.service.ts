@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import {
   BadRequestException,
   HttpException,
@@ -13,6 +14,7 @@ import {
   AskResponse,
   ConversationMessageRole,
   GeneratedSql,
+  minimizeResultForLlm,
   QueryResult,
   ResultAnalysis,
   SAFE_MESSAGES,
@@ -49,6 +51,7 @@ export class AskService {
     private readonly queries: QueryExecutionService,
     private readonly conversations: ConversationsService,
     private readonly connections: DatabaseConnectionsService,
+    private readonly config: ConfigService,
   ) {}
 
   async ask(userId: string, req: AskRequest, ctx: RequestCtx, viewer: { isAdmin: boolean } = { isAdmin: false }): Promise<AskResponse> {
@@ -231,7 +234,15 @@ export class AskService {
     const fallback = deterministicAnswer(facts);
     if (facts.isEmpty) return fallback; // nothing for a model to add
 
-    const wording = await this.ai.summarize(question, columns, result.rows, {
+    // Privacy mode: nothing from the result leaves the server; the local answer stands.
+    if (!this.config.get<boolean>('ai.sendRowValues', true)) return fallback;
+
+    // The model gets a small scrubbed view (see minimizeResultForLlm), never the result itself.
+    const view = minimizeResultForLlm(columns, result.rows);
+    this.logger.debug(
+      `AI answer payload: rows ${view.rows.length}/${result.rows.length}, columns ${view.columns.length}/${columns.length}, masked ${view.omitted.maskedColumns.length}, secret columns dropped ${view.omitted.secretColumns}, values redacted ${view.omitted.redactedValues}`,
+    );
+    const wording = await this.ai.summarize(question, view, {
       returnedRows: result.returnedRows,
       totalRows: result.totalRows,
       truncated: result.truncated,

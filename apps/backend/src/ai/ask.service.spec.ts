@@ -31,7 +31,7 @@ function build(delays: { context: number; classify: number }) {
     append: jest.fn().mockResolvedValue(undefined),
   };
   const connections = { get: jest.fn().mockResolvedValue({ id: 'c1' }) };
-  const service = new AskService(ai as never, {} as never, conversations as never, connections as never);
+  const service = new AskService(ai as never, {} as never, conversations as never, connections as never, { get: () => true } as never);
   return { service, ai, calls };
 }
 
@@ -78,5 +78,60 @@ describe('AskService: independent steps run together (F14)', () => {
     const res = await service.ask('u1', { connectionId: 'c1', question: 'Only Mumbai', conversationId: 'conv' }, {});
     expect(res.success).toBe(false);
     expect(res.error?.stage).toBe('generation');
+  });
+});
+
+describe('AskService: what the answer model is sent (F15)', () => {
+  const result = {
+    columns: [{ name: 'name', type: 'text' }, { name: 'email', type: 'text' }, { name: 'password_hash', type: 'text' }, { name: 'spend', type: 'integer' }],
+    rows: Array.from({ length: 50 }, (_, i) => ({ name: `Customer ${i}`, email: `c${i}@example.com`, password_hash: '$2b$12$abcdefghijklmnopqrstuv', spend: 1000 + i })),
+    returnedRows: 50,
+    totalRows: 50,
+    truncated: false,
+    executionTimeMs: 3,
+    historyId: 'h1',
+    status: 'SUCCESS',
+  };
+
+  function setup(sendRowValues: boolean) {
+    const ai = {
+      prepareContext: jest.fn().mockResolvedValue({ connection: {}, schemaContext: {} }),
+      isFollowUp: jest.fn().mockResolvedValue(false),
+      generate: jest.fn().mockResolvedValue({
+        unanswerable: false, sql: 'SELECT * FROM customers', explanation: '', assumptions: [], warnings: [], tablesUsed: [], confidence: 1,
+        visualization: { recommended: false, type: 'table', xField: null, yField: null },
+      }),
+      summarize: jest.fn().mockResolvedValue('Found 50 customers.'),
+    };
+    const service = new AskService(
+      ai as never,
+      { execute: jest.fn().mockResolvedValue(result) } as never,
+      { create: jest.fn().mockResolvedValue({ id: 'conv' }), recentTurns: jest.fn().mockResolvedValue([]), append: jest.fn() } as never,
+      { get: jest.fn().mockResolvedValue({}) } as never,
+      { get: (_k: string, d?: unknown) => (_k === 'ai.sendRowValues' ? sendRowValues : d) } as never,
+    );
+    return { service, ai };
+  }
+
+  it('the answer model gets a scrubbed 20-row view: no secret column, no emails, no identifiers', async () => {
+    const { service, ai } = setup(true);
+    const res = await service.ask('u1', { connectionId: 'c1', question: 'Show customers' }, {});
+    expect(res.rows).toHaveLength(50); // the USER still gets the full, real result
+    expect(res.rows[0].email).toBe('c0@example.com');
+
+    const view = ai.summarize.mock.calls[0][1] as { columns: string[]; rows: Array<Record<string, unknown>> };
+    expect(view.rows).toHaveLength(20);
+    expect(view.columns).not.toContain('password_hash');
+    const sent = JSON.stringify(view);
+    expect(sent).not.toMatch(/\$2b\$|@example\.com/);
+    expect(sent).toContain('[hidden]');
+  });
+
+  it('privacy mode: no result value leaves the server and the answer is built locally', async () => {
+    const { service, ai } = setup(false);
+    const res = await service.ask('u1', { connectionId: 'c1', question: 'Show customers' }, {});
+    expect(ai.summarize).not.toHaveBeenCalled();
+    expect(res.success).toBe(true);
+    expect(res.explanation).toMatch(/50 rows/);
   });
 });

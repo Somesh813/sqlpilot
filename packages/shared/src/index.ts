@@ -8,3 +8,4 @@ export * from './row-summary';
 export * from './schema-select';
 export * from './answer-facts';
 export * from './safe-errors';
+export * from './llm-privacy';

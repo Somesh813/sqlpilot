@@ -20,6 +20,8 @@ import {
   AiExplanationMode,
   AuditAction,
   GeneratedSql,
+  LlmResultView,
+  maskPii,
   SafeDatabaseConnection,
   SchemaContext,
   SqlExplanation,
@@ -170,7 +172,8 @@ export class AiSqlService {
     databaseError: string,
   ): Promise<SqlFix> {
     const schemaContext = await this.contextForSql(userId, connectionId, sql);
-    const messages = buildSqlFixMessages({ schema: schemaContext, sql, databaseError });
+    // The error text can quote values from the user's data; contact details are masked before it leaves.
+    const messages = buildSqlFixMessages({ schema: schemaContext, sql, databaseError: maskPii(databaseError) });
     const { data } = await this.call(() =>
       this.ai.completeStructured({ messages, temperature: 0 }, sqlFixSchema, 'sql_fix'),
     );
@@ -189,12 +192,11 @@ export class AiSqlService {
    */
   async summarize(
     question: string,
-    columns: string[],
-    rows: Array<Record<string, unknown>>,
+    view: LlmResultView,
     scope: { returnedRows: number; totalRows: number | null; truncated: boolean },
   ): Promise<string | null> {
     try {
-      const messages = buildResultSummaryMessages({ question, columns, rows, ...scope });
+      const messages = buildResultSummaryMessages({ question, view, ...scope });
       const { data } = await this.ai.completeStructured(
         { messages, temperature: 0.2, model: this.fastModel() },
         resultAnswerSchema,

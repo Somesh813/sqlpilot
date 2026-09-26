@@ -113,6 +113,7 @@ all-zero encryption keys, and MongoDB URLs without credentials.
 | `AI_PROVIDER` | | `openai` (default) or `groq` |
 | `OPENAI_API_KEY` / `GROQ_API_KEY` | prod | Key for the selected provider. Without it, AI routes answer 503 |
 | `OPENAI_MODEL`, `OPENAI_MODEL_FAST`, `GROQ_MODEL`, `GROQ_MODEL_FAST` | | Model ids |
+| `AI_SEND_ROW_VALUES` | | `true` (default) lets a scrubbed sample of each result reach the AI provider to word the answer; `false` sends no result values at all |
 | `AI_MAX_SCHEMA_TABLES` | | Tables sent to the model before narrowing kicks in (default `25`) |
 | `QUERY_TIMEOUT_MS` | | Per-query timeout (default `15000`) |
 | `QUERY_MAX_ROWS` | | Row cap (default `1000`) |
@@ -156,6 +157,7 @@ that each stand on their own.
 | Connection policy | SQLite files only inside approved directories (symlinks resolved, one uniform error). Network hosts checked against an allowlist or blocked if private, loopback or metadata. Errors shown to users are generic. |
 | Credentials | Encrypted with AES-256-GCM at rest, decrypted only in the backend, never returned. Passwords hashed with bcrypt. |
 | Auth | Short-lived access tokens, rotating refresh tokens with reuse detection, per-client rate limits that work behind a reverse proxy. |
+| AI data minimisation | The model sees the schema (names and types only, never values), the question, and the earlier SQL, not earlier answers. For wording an answer it gets at most 20 rows, 10 columns and 60-character cells, with secret columns dropped, identifier columns dropped, contact and identity columns shown as `[hidden]`, and credential-, card-, phone- and email-shaped values scrubbed. A final guard removes anything credential-shaped from every outbound request. The full result never leaves the server. |
 | Answer grounding | Numbers and "no results" claims in the AI's answer are checked against the data. A wrong answer is replaced by a deterministic one. |
 | Deployment | No default secrets, no published database or API ports, internal Docker network, read-only backend container. |
 
