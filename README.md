@@ -1,349 +1,272 @@
 # SQLPilot
 
-**AI-powered SQL assistant.** Connect a database, ask questions in natural language, and get
-schema-aware SQL that is validated, explained, and safely executed — with results, charts,
-history, and optimization suggestions in one workspace.
+**Ask your database questions in plain English.** SQLPilot connects to PostgreSQL, MySQL or
+SQLite, turns a question into a validated read-only query, runs it, and answers with the real
+rows, a chart when one makes sense, and a short explanation written from the actual data.
 
-> Status: **Phases 1–11 complete** (architecture, auth, connections, schema discovery, SQL
-> editor/execution, AI generation/explain/optimize/fix, history, saved queries, charts,
-> security hardening, tests). 93 tests passing. Phase 12 (production Docker polish) is in
-> progress. See [`PROGRESS.md`](./PROGRESS.md) for the phase-by-phase detail.
+It is built for people who do not write SQL, so the answer comes first and the SQL sits behind a
+toggle. It is also built not to trust its own AI: every query is parsed and checked before it
+runs, the database itself enforces read-only, and the written answer is verified against the
+result before you see it.
 
----
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+![Node 20+](https://img.shields.io/badge/node-20%2B-339933)
+![Angular 18](https://img.shields.io/badge/angular-18-dd0031)
+![NestJS 10](https://img.shields.io/badge/nestjs-10-e0234e)
 
 ## Contents
 
-- [Overview](#overview)
+- [How it works](#how-it-works)
 - [Features](#features)
-- [Architecture](#architecture)
-- [Tech stack](#tech-stack)
-- [Repository layout](#repository-layout)
-- [Getting started](#getting-started)
-- [Environment variables](#environment-variables)
-- [Running locally](#running-locally)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
 - [Docker](#docker)
-- [API](#api)
 - [Security model](#security-model)
-- [AI architecture](#ai-architecture)
-- [Database support](#database-support)
+- [Architecture](#architecture)
+- [API](#api)
 - [Testing](#testing)
-- [Screenshots](#screenshots)
-- [Future improvements](#future-improvements)
+- [Project status](#project-status)
+- [Contributing](#contributing)
+- [License](#license)
 
----
+## How it works
 
-## Overview
+```
+question ─▶ schema context ─▶ AI writes SQL ─▶ validate (AST) ─▶ run read-only ─▶ result
+                                                                                   │
+        answer shown  ◀─ verified against the data ◀─ AI words it ◀─ facts ◀───────┘
+```
 
-SQLPilot lets a user connect PostgreSQL, MySQL, or SQLite databases, inspect their schema,
-and ask questions like _"show me the top 10 customers by total spending this year"_. The AI
-uses only the relevant slice of the schema to produce a **single read-only SELECT**, which is
-parsed, validated against a security policy, shown to the user for review and editing, and
-only then executed with a timeout and row cap. Results render in a professional data grid
-with export and charting, and the AI can explain, optimize, or repair any query.
+1. **Schema context.** Small schemas are sent whole. Larger ones are narrowed by meaning and
+   joined through the foreign-key graph, so tables like `customers → orders → order_items → products`
+   are all present even when the question only names two of them.
+2. **SQL generation.** The model returns structured JSON (SQL, assumptions, confidence), never free text.
+3. **Validation.** The SQL is parsed into an AST and rejected unless it is a single `SELECT`
+   (or `WITH` over `SELECT`s). See the [security model](#security-model).
+4. **Execution.** The query runs inside a real read-only transaction with a timeout, fetching at
+   most 1,000 rows plus one, so truncation is detected exactly and never silent.
+5. **Answer.** Deterministic code analyses the result and picks the view. The model only words
+   the answer, and any number or claim that contradicts the data is replaced by a plain, true sentence.
 
 ## Features
 
-| Area | Capability |
-| --- | --- |
-| Auth | Register, login, logout, refresh-token rotation with reuse detection, forgot/reset password, change password, `USER` / `ADMIN` roles |
-| Connections | Add / test / edit / delete PostgreSQL, MySQL, SQLite connections; encrypted credentials; connection status |
-| Schema | Automatic discovery of tables, columns, types, keys, indexes, relationships |
-| AI Assistant | Natural-language → SQL, structured JSON output, assumptions, confidence, warnings, conversation context (only relevant tables sent, not the whole schema) |
-| SQL editor | Line-numbered editor with formatting, generate / validate / explain / optimize / run, Ctrl+Enter to run |
-| Execution | SQL parse → validation → security policy → user confirmation → execution; timeout, row limits, pagination |
-| Results | Sortable / filterable grid, cell copy, CSV / JSON export, server-side pagination |
-| Visualization | AI-recommended bar / line / area / pie / scatter charts (ECharts), theme-aware |
-| Explain / Optimize / Fix | Simple + technical explanations, advisory optimization, error-driven repair ("Fix with AI") |
-| History & saved queries | Searchable/filterable history, favorites with tags, reusable prompt templates |
-| Admin write policy | Per-connection write toggle (ADMIN-only) gated by a global kill switch |
-| Observability | Structured logging, request IDs, health endpoint, audit log (ADMIN-viewable) |
+- **Chat-style assistant.** Follow-ups work: "only the top 5", "filter those to Mumbai", "remove the filter", "show it as a chart".
+- **Real results.** Table with sorting, wide-table scrolling and CSV export; bar, line, area, pie and scatter charts (ECharts) chosen from the shape of the data.
+- **Honest about limits.** "Showing 1,000 of 1,500 rows." or "Showing the first 1,000 rows. More results are available."
+- **SQL workspace.** Editor with generate, validate, explain, optimize, and "fix with AI" for failing queries.
+- **Connections.** PostgreSQL, MySQL and SQLite with encrypted credentials, schema discovery, and warnings when an account has more privileges than it needs.
+- **History and saved queries,** per-user isolation, audit log for admins.
+- **Accounts.** Register, login, rotating refresh tokens with reuse detection, password reset by email, `USER` and `ADMIN` roles.
+- **Two AI providers.** OpenAI or Groq, switched by one setting.
 
-## Architecture
+## Quick start
 
-```
-                    ┌────────────────────────┐
-   Browser  ─────▶  │  Angular SPA (frontend) │
-                    └───────────┬────────────┘
-                                │ REST / SSE  (JWT)
-                    ┌───────────▼────────────┐        ┌──────────────┐
-                    │   NestJS API (backend) │ ─────▶ │  MongoDB     │  app data
-                    │                        │        └──────────────┘
-                    │  auth · connections ·  │
-                    │  schema · ai · sql ·   │        ┌──────────────────────────┐
-                    │  query-execution ·     │ ─────▶ │ External SQL DBs         │
-                    │  history · audit       │        │ Postgres / MySQL / SQLite│
-                    └───────────┬────────────┘        └──────────────────────────┘
-                                │
-             ┌──────────────────┼─────────────────────┐
-             ▼                  ▼                     ▼
-     @sqlpilot/ai       @sqlpilot/sql-parser    @sqlpilot/database
-   prompt templates,    AST parse, statement    driver adapters +
-   OpenAI provider,     classification,         schema introspection
-   structured output    security policy
-```
-
-Every generated query flows through:
-
-```
-AI generation → SQL parser → SQL validation → security policy → user confirmation → execution
-```
-
-## Tech stack
-
-- **Frontend:** Angular 18 (standalone + signals), TypeScript, RxJS, Tailwind CSS, ECharts, a small dependency-free SQL editor component
-- **Backend:** Node.js 20, NestJS 10, REST, Mongoose, Passport JWT, `class-validator`, Helmet, pino
-- **AI:** OpenAI **or Groq** (switch with `AI_PROVIDER`) with JSON-schema structured outputs and prompt templates
-- **Databases:** MongoDB (application data); PostgreSQL / MySQL / SQLite (external, user-connected)
-- **Infra:** Docker + Docker Compose
-- **Testing:** Jest, Supertest, `mongodb-memory-server`, Karma/Jasmine
-
-## Repository layout
-
-```
-sqlpilot/
-├── apps/
-│   ├── backend/        NestJS API
-│   └── frontend/       Angular SPA
-├── packages/
-│   ├── shared/         Types, enums, DTO contracts, constants shared front↔back
-│   ├── sql-parser/     SQL AST parsing + security validation (unit-tested)
-│   ├── ai/             OpenAI/Groq provider abstraction + prompt templates + output schemas
-│   └── database/       Postgres/MySQL/SQLite drivers + schema introspection
-├── docker/             Dockerfiles, nginx config, mongo init
-├── docs/               Architecture and security notes
-├── docker-compose.yml
-├── .env.example
-└── PROGRESS.md
-```
-
-## Getting started
-
-Requires **Node 20+** and **npm 10+** (and Docker if you want the containerized stack).
+You need **Node 20+**, **npm 10+**, MongoDB, and an API key for OpenAI or Groq.
 
 ```bash
-git clone <this-repo> sqlpilot
+git clone https://github.com/<your-user>/sqlpilot.git
 cd sqlpilot
-cp .env.example .env      # then fill in secrets — see below
 npm install
-npm run build:packages    # compile the shared workspace packages
+cp .env.example .env
 ```
 
-Generate secrets:
+Generate the secrets and paste them into `.env`:
 
 ```bash
-# JWT secrets
-node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
-# Encryption key (must be 64 hex chars / 32 bytes)
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+node -e "console.log('JWT_SECRET=' + require('crypto').randomBytes(48).toString('hex'))"
+node -e "console.log('JWT_REFRESH_SECRET=' + require('crypto').randomBytes(48).toString('hex'))"
+node -e "console.log('ENCRYPTION_KEY=' + require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-## Environment variables
-
-| Variable | Required | Description |
-| --- | --- | --- |
-| `NODE_ENV` | – | `development` \| `test` \| `production` |
-| `PORT` | – | API port (default `3000`) |
-| `CORS_ORIGIN` | – | Comma-separated allowed origins |
-| `DATABASE_URL` | ✅ | MongoDB connection string for application data |
-| `JWT_SECRET` | ✅ | Access-token signing secret |
-| `JWT_REFRESH_SECRET` | ✅ | Refresh-token signing secret (must differ from `JWT_SECRET`) |
-| `JWT_ACCESS_EXPIRES_IN` | – | e.g. `15m` |
-| `JWT_REFRESH_EXPIRES_IN` | – | e.g. `7d` |
-| `ENCRYPTION_KEY` | ✅ | 64 hex chars — AES-256-GCM key for stored DB credentials |
-| `AI_PROVIDER` | – | `openai` (default) or `groq` |
-| `OPENAI_API_KEY` | prod* | OpenAI key (required in production when `AI_PROVIDER=openai`) |
-| `GROQ_API_KEY` | prod* | Groq key (required in production when `AI_PROVIDER=groq`) |
-| `GROQ_MODEL` / `GROQ_MODEL_FAST` | – | Default `openai/gpt-oss-120b` / `openai/gpt-oss-20b` |
-| `AI_STRUCTURED_OUTPUT_MODE` | – | `json_schema` (default) or `json_object` for models without strict-schema support |
-| `OPENAI_MODEL` / `OPENAI_MODEL_FAST` | – | Model ids |
-| `QUERY_TIMEOUT_MS` | – | Per-query timeout (default `15000`) |
-| `QUERY_MAX_ROWS` | – | Max rows returned (default `1000`) |
-| `ALLOW_WRITE_QUERIES` | – | Global kill switch for write statements (default `false`) |
-| `SQLITE_ALLOWED_DIRS` | – | Comma-separated directories SQLite files must live in (default `./data/sqlite`) |
-| `DB_ALLOWED_HOSTS` | – | Optional host allowlist: names, `*.suffix`, IPs, CIDRs. Empty in production = private/loopback/metadata addresses are refused |
-| `TRUST_PROXY_HOPS` | – | Reverse proxies whose `X-Forwarded-For` entry is trusted (default `0`; `1` behind the bundled nginx) |
-| `MAIL_TRANSPORT` | – | `smtp`, `file` (dev outbox, refused in production) or `none` (production default) |
-| `MAIL_SMTP_URL` / `MAIL_FROM` / `APP_BASE_URL` | – | SMTP connection, sender, and public URL for emailed links |
-
-The API validates these on boot and refuses to start if a required value is missing or malformed.
-
-## Running locally
+Add an AI key (`OPENAI_API_KEY`, or `GROQ_API_KEY` with `AI_PROVIDER=groq`), then start MongoDB and the apps:
 
 ```bash
-# 1. Start MongoDB. Either use a local install (DATABASE_URL=mongodb://localhost:27017/sqlpilot)
-#    or the bundled container, published on the host loopback only. Set MONGO_ROOT_PASSWORD and
-#    MONGO_APP_PASSWORD in .env first (there are no default passwords), then use
-#    DATABASE_URL=mongodb://sqlpilot:<MONGO_APP_PASSWORD>@localhost:27017/sqlpilot?authSource=sqlpilot
+# MongoDB: a local install works (DATABASE_URL=mongodb://localhost:27017/sqlpilot),
+# or use the bundled container (needs MONGO_ROOT_PASSWORD and MONGO_APP_PASSWORD in .env):
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mongo
 
-# 2. Backend  →  http://localhost:3000/api
-npm run dev:backend
-
-# 3. Frontend →  http://localhost:4200  (proxies /api to the backend)
-npm run dev:frontend
+npm run build:packages     # compile the shared workspace packages (re-run after changing them)
+npm run dev:backend        # API      http://localhost:3000/api
+npm run dev:frontend       # Web app  http://localhost:4200
 ```
+
+Open <http://localhost:4200>, create an account, and add a connection.
+
+**Trying it with SQLite.** SQLite files must live in an approved directory. In development that
+is `apps/backend/data/sqlite` (change it with `SQLITE_ALLOWED_DIRS`). Copy a `.sqlite` file
+there and use its full path when adding the connection.
+
+**Password reset in development.** Emails are written to `apps/backend/data/outbox/` instead of
+being sent. Open the newest file to get the link.
+
+## Configuration
+
+Everything is set through environment variables. The API validates them on boot and refuses to
+start on a missing or malformed value. In production it also rejects placeholder secrets,
+all-zero encryption keys, and MongoDB URLs without credentials.
+
+| Variable | Required | Description |
+| --- | :---: | --- |
+| `DATABASE_URL` | yes | MongoDB connection string for application data |
+| `JWT_SECRET`, `JWT_REFRESH_SECRET` | yes | Token signing secrets. Must differ; 32+ characters in production |
+| `ENCRYPTION_KEY` | yes | 64 hex characters. AES-256-GCM key for stored connection credentials |
+| `AI_PROVIDER` | | `openai` (default) or `groq` |
+| `OPENAI_API_KEY` / `GROQ_API_KEY` | prod | Key for the selected provider. Without it, AI routes answer 503 |
+| `OPENAI_MODEL`, `OPENAI_MODEL_FAST`, `GROQ_MODEL`, `GROQ_MODEL_FAST` | | Model ids |
+| `AI_MAX_SCHEMA_TABLES` | | Tables sent to the model before narrowing kicks in (default `25`) |
+| `QUERY_TIMEOUT_MS` | | Per-query timeout (default `15000`) |
+| `QUERY_MAX_ROWS` | | Row cap (default `1000`) |
+| `ALLOW_WRITE_QUERIES` | | Global kill switch for writes in the SQL editor (default `false`) |
+| `SQLITE_ALLOWED_DIRS` | | Comma-separated directories SQLite files must live in (default `./data/sqlite`) |
+| `DB_ALLOWED_HOSTS` | | Optional allowlist of database hosts: names, `*.suffix`, IPs, CIDRs |
+| `DB_BLOCK_PRIVATE_HOSTS` | | Refuse loopback, private and cloud-metadata addresses. Defaults to `true` in production |
+| `TRUST_PROXY_HOPS` | | Reverse proxies whose `X-Forwarded-For` entry is trusted (default `0`, `1` behind the bundled nginx) |
+| `MAIL_TRANSPORT` | | `smtp`, `file` (dev outbox, refused in production) or `none` (production default) |
+| `MAIL_SMTP_URL`, `MAIL_FROM`, `APP_BASE_URL` | | SMTP connection, sender, and the public URL used in emailed links |
+| `CORS_ORIGIN`, `PORT`, `LOG_LEVEL` | | Allowed origins, API port, log level |
+
+See [`.env.example`](./.env.example) for the full list with comments.
 
 ## Docker
 
 ```bash
-cp .env.example .env    # fill in JWT_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY, MONGO_ROOT_PASSWORD,
-                        # MONGO_APP_PASSWORD (openssl rand -hex 24), and OPENAI_API_KEY or GROQ_API_KEY
+cp .env.example .env    # set the secrets, MONGO_ROOT_PASSWORD, MONGO_APP_PASSWORD (openssl rand -hex 24), and an AI key
 docker compose up --build
 ```
 
-- Web app and API (through nginx): <http://localhost:8080>. This is the only published port, bound to loopback; put a TLS proxy in front, or set `WEB_BIND=0.0.0.0` deliberately.
+- The web app and API are served through nginx on <http://localhost:8080>. That is the only published port, bound to loopback. Put a TLS-terminating proxy in front, or set `WEB_BIND=0.0.0.0` on purpose.
 - MongoDB and the API container are not reachable from the host.
-- Compose refuses to start while any secret is unset, and production start-up rejects placeholder or well-known credentials.
-- SQLite files go in the `sqlite-data` volume (`/app/data/sqlite`); other hosts must satisfy `DB_ALLOWED_HOSTS` / the private-network block.
-- Password reset emails need `MAIL_TRANSPORT=smtp` + `MAIL_SMTP_URL`; until then the feature is off and nothing sensitive is logged.
-
-## API
-
-Base path: `/api`. All routes require a `Bearer` access token except the ones marked _public_.
-
-### Auth
-
-| Method | Path | Public | Description |
-| --- | --- | :---: | --- |
-| POST | `/auth/register` | ✅ | Create account, returns tokens |
-| POST | `/auth/login` | ✅ | Returns tokens |
-| POST | `/auth/refresh` | ✅ | Rotate refresh token |
-| POST | `/auth/logout` | ✅ | Revoke a refresh token |
-| POST | `/auth/forgot-password` | ✅ | Email a reset link (same empty answer whether or not the account exists) |
-| POST | `/auth/reset-password` | ✅ | Reset with token |
-| GET | `/auth/profile` | | Current user |
-| POST | `/auth/change-password` | | Change password, revokes sessions |
-| GET | `/health` | ✅ | Liveness + Mongo + memory checks |
-
-### Databases & schema
-
-| Method | Path | Notes |
-| --- | --- | --- |
-| GET / POST | `/databases` | List / create a connection |
-| POST | `/databases/test` | Test connection params before saving |
-| GET / PATCH / DELETE | `/databases/:id` | Manage one connection |
-| POST | `/databases/:id/test` | Re-test a stored connection |
-| PATCH | `/databases/:id/write-policy` | **ADMIN only** — enable/disable write statements |
-| GET | `/databases/:id/schema` | Cached schema snapshot (discovers on first read) |
-| POST | `/databases/:id/schema/refresh` | Force re-discovery |
-
-### Queries
-
-| Method | Path | Notes |
-| --- | --- | --- |
-| POST | `/queries/validate` | Run the security policy without executing |
-| POST | `/queries/execute` | Validate → policy → `confirmed:true` required → execute |
-| GET | `/queries/history` | Paginated, filterable by connection/status/search |
-| DELETE | `/queries/history/:id` | Remove one entry |
-| POST | `/queries/save` · GET `/queries/saved` · PATCH/DELETE `/queries/saved/:id` | Saved queries |
-| GET/POST `/prompts` · DELETE `/prompts/:id` | Reusable prompt templates |
-
-### AI
-
-| Method | Path | Notes |
-| --- | --- | --- |
-| POST | `/ai/ask` | **The assistant's main call.** Natural language in → answer, real rows, result type and chart recommendation out (see contract below) |
-| POST | `/ai/generate-sql` | NL → structured SQL only (no execution); appends to the conversation if `conversationId` is given |
-| POST | `/ai/explain-sql` | `mode: "simple" \| "technical"` |
-| POST | `/ai/optimize-sql` | Advisory optimization with a disclaimer, never a guarantee |
-| POST | `/ai/fix-sql` | Given the failing SQL + database error, returns a corrected query |
-
-#### `POST /ai/ask` response contract
-
-```jsonc
-{
-  "success": true,
-  "question": "Show the top 10 customers by spending",
-  "conversationId": "…",
-  "sql": "SELECT …",
-  "columns": ["customer_name", "total_spending"],
-  "rows": [{ "customer_name": "Kabir", "total_spending": 229500 }],
-  "rowCount": 10, "totalRowCount": 10, "truncated": false, "executionTimeMs": 3,
-  "resultType": "categorical",   // empty | single_value | table | categorical | time_series | multi_series | percentage_distribution | correlation
-  "visualization": { "recommended": true, "type": "bar", "xColumn": "customer_name", "yColumns": ["total_spending"] },
-  "availableViews": ["bar", "pie", "table"],   // only views that make sense for this data
-  "explanation": "The top 10 customers by spending are…",   // plain-language answer written from the ACTUAL rows
-  "queryExplanation": "…", "assumptions": [], "warnings": [], "autoFixed": false,
-  "error": null   // or { stage: "generation" | "execution", message, technical }
-}
-```
-
-Handled failures (not understood, unsafe SQL, database error) return **200** with `success: false` and a
-friendly `explanation`, so the UI always has something to show. A DB error is repaired automatically once.
-The chart type is decided by `analyzeResult()` in `@sqlpilot/shared` (deterministic; the model's opinion is only a hint),
-so a chart is never recommended for a single value, free text, or ID-only data.
-
-Every AI endpoint returns **503** with a clear message (never a crash) when the selected provider's key
-(`OPENAI_API_KEY` / `GROQ_API_KEY`) is unset. AI-generated SQL is re-validated by `@sqlpilot/sql-parser` before it's ever returned.
-
-### Conversations & analytics
-
-| Method | Path | Notes |
-| --- | --- | --- |
-| GET/POST `/conversations` · GET/DELETE `/conversations/:id` | AI chat sessions |
-| GET | `/analytics/dashboard` | Per-user stats for the dashboard |
-| GET | `/audit` | **ADMIN only** — audit log |
+- There are no default passwords. Compose refuses to start while a secret is unset.
+- SQLite files go in the `sqlite-data` volume (`/app/data/sqlite`).
+- Password-reset email needs `MAIL_TRANSPORT=smtp` and `MAIL_SMTP_URL`. Until then the feature is off and nothing sensitive is logged.
+- An existing Mongo volume keeps its old credentials. Reset the volume or create the app user by hand when moving to this setup.
 
 ## Security model
 
-- **Credentials never reach the browser.** External DB passwords are AES-256-GCM encrypted
-  at rest (`EncryptionService`) and only decrypted inside the backend at query time.
-- **AI SQL is never executed blindly.** `@sqlpilot/sql-parser` parses each statement to an
-  AST, classifies it (`READ` / `WRITE` / `DDL` / `DCL` / …), and applies a policy:
-  - `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, and similar are **always blocked**.
-  - `INSERT` / `UPDATE` / `DELETE` are blocked unless an admin enables write mode for the
-    connection **and** `ALLOW_WRITE_QUERIES=true`.
-  - Stacked statements, `INTO OUTFILE`, and locking reads are rejected.
-  - String literals and comments are stripped before keyword scanning so payloads cannot hide inside them.
-  - A `LIMIT` is injected into limit-less `SELECT`s.
-- **Execution guards:** statement timeout, max row count, pagination, read-only transaction
-  where the engine supports it.
-- **Auth:** bcrypt (12 rounds), short-lived access tokens, rotating refresh tokens with
-  reuse detection, uniform "invalid email or password" responses.
-- **Audit log:** connection changes, query execution, blocked queries, logins.
+SQLPilot connects to real databases on behalf of users and runs AI-written SQL, so it uses layers
+that each stand on their own.
 
-See [`docs/security.md`](./docs/security.md) for details.
+| Layer | What it does |
+| --- | --- |
+| AST validation | One statement only, and it must be a `SELECT` or a `WITH` over `SELECT`s. Rejects `INSERT`, `UPDATE`, `DELETE`, DDL, `GRANT`/`REVOKE`, `SELECT INTO`, `FOR UPDATE`, nested data-modifying CTEs, and about 100 dangerous functions (`pg_read_file`, `lo_import`, `dblink`, `pg_sleep`, `nextval`, `LOAD_FILE`, `SLEEP`, `load_extension` and more). Anything it cannot parse is rejected. |
+| Dialect-aware lexing | Comments are removed using each engine's real rules (`#` in MySQL, nested comments in PostgreSQL, dollar-quotes). The text that is validated is exactly the text that runs. |
+| Database-enforced read-only | PostgreSQL `BEGIN READ ONLY`, MySQL `START TRANSACTION READ ONLY`, SQLite `query_only`. A last-line check also refuses `COPY … PROGRAM`, which a read-only transaction does not stop for a superuser. |
+| Resource limits | Statement timeout, row cap by fetching `limit + 1`, and SQLite queries in a child process that is killed on timeout so a heavy query cannot freeze the API. |
+| Connection policy | SQLite files only inside approved directories (symlinks resolved, one uniform error). Network hosts checked against an allowlist or blocked if private, loopback or metadata. Errors shown to users are generic. |
+| Credentials | Encrypted with AES-256-GCM at rest, decrypted only in the backend, never returned. Passwords hashed with bcrypt. |
+| Auth | Short-lived access tokens, rotating refresh tokens with reuse detection, per-client rate limits that work behind a reverse proxy. |
+| Answer grounding | Numbers and "no results" claims in the AI's answer are checked against the data. A wrong answer is replaced by a deterministic one. |
+| Deployment | No default secrets, no published database or API ports, internal Docker network, read-only backend container. |
 
-## AI architecture
+**Recommended:** connect with a dedicated read-only database account. SQLPilot warns when the
+account is a PostgreSQL superuser or a MySQL user with write or admin grants.
 
-The `@sqlpilot/ai` package isolates all model interaction behind an `AiProvider` interface
-(`OpenAiProvider` is the implementation; Groq exposes an OpenAI-compatible API, so
-`AI_PROVIDER=groq` reuses the same client pointed at `https://api.groq.com/openai/v1`. A
-`DisabledAiProvider` is bound instead when the selected provider's key is unset, so the API
-still boots and every AI route answers 503 rather than crashing). Feature services compose prompt templates (`buildSqlGenerationMessages`,
-`buildSqlExplanationMessages`, …) and request **structured JSON** validated against Zod
-schemas — no free-text parsing. `SchemaService.buildContext()` keyword-scores tables/columns
-against the question, pulls in directly related tables via foreign keys, and caps the result
-at `AI_MAX_SCHEMA_TABLES` so large schemas never blow the context window. Every model-generated
-query is re-validated by `@sqlpilot/sql-parser` before it is returned to the client.
+Details are in [`docs/security.md`](./docs/security.md). To report a vulnerability, please open a
+private security advisory on GitHub instead of a public issue.
 
-## Database support
+## Architecture
 
-| Engine | Driver | Schema introspection | Notes |
-| --- | --- | --- | --- |
-| PostgreSQL | `pg` | `information_schema` + `pg_*` | `SET statement_timeout`, read-only tx |
-| MySQL | `mysql2` | `information_schema` | `MAX_EXECUTION_TIME` hint |
-| SQLite | `better-sqlite3` | `PRAGMA` | file path on the backend host; opened read-only |
+```
+Browser ──▶ Angular SPA ──▶ nginx ──▶ NestJS API ──▶ MongoDB   (users, connections, history, audit)
+                                          │
+                                          └──▶ your PostgreSQL / MySQL / SQLite
+```
+
+npm workspaces monorepo:
+
+```
+sqlpilot/
+├── apps/
+│   ├── backend/          NestJS API: auth, connections, schema, AI, query execution, history
+│   └── frontend/         Angular 18 SPA (standalone components, signals, Tailwind, ECharts)
+├── packages/
+│   ├── shared/           Contracts, result analysis, schema selection, answer verification
+│   ├── sql-parser/       Lexer, AST inspection and the security policy
+│   ├── ai/               Provider abstraction (OpenAI / Groq), prompts, output schemas
+│   └── database/         PostgreSQL / MySQL / SQLite drivers and schema introspection
+├── docker/               Dockerfiles, nginx config, Mongo init script
+├── docs/                 Architecture and security notes
+└── docker-compose.yml
+```
+
+More in [`docs/architecture.md`](./docs/architecture.md).
+
+## API
+
+Base path `/api`. Every route needs a Bearer token except the public auth routes and `/health`.
+The assistant's main call is `POST /ai/ask`:
+
+```jsonc
+// request
+{ "connectionId": "…", "question": "Show the top 10 customers by spending", "conversationId": "…" }
+
+// response
+{
+  "success": true,
+  "sql": "SELECT …",
+  "columns": ["customer_name", "total_spending"],
+  "rows": [{ "customer_name": "Kabir", "total_spending": 229500 }],
+  "returnedRows": 10,          // rows in `rows`
+  "totalRows": 10,             // exact total when known, otherwise null
+  "truncated": false,          // true when the database had more rows than were returned
+  "resultType": "categorical", // empty | single_value | table | categorical | time_series | …
+  "visualization": { "recommended": true, "type": "bar", "xColumn": "customer_name", "yColumns": ["total_spending"] },
+  "availableViews": ["bar", "pie", "table"],
+  "explanation": "The top 10 customers by spending are …",
+  "error": null                // or { stage, message, technical }
+}
+```
+
+Expected failures (not understood, unsafe SQL, database error) come back as `200` with
+`success: false` and a friendly `explanation`, so the UI always has something to show.
+
+| Area | Routes |
+| --- | --- |
+| Auth | `POST /auth/register`, `login`, `refresh`, `logout`, `forgot-password`, `reset-password`, `change-password`; `GET /auth/profile` |
+| Connections | `GET/POST /databases`, `POST /databases/test`, `GET/PATCH/DELETE /databases/:id`, `POST /databases/:id/test`, `GET /databases/:id/schema`, `POST /databases/:id/schema/refresh` |
+| Queries | `POST /queries/validate`, `POST /queries/execute`, history and saved-query routes under `/queries` |
+| AI | `POST /ai/ask`, `generate-sql`, `explain-sql`, `optimize-sql`, `fix-sql` |
+| Other | `/conversations`, `/analytics/dashboard`, `/health`, `GET /audit` (admin) |
 
 ## Testing
 
 ```bash
-npm test                     # all workspaces
-npm run test:backend         # backend unit tests
-npm run test --workspace @sqlpilot/sql-parser   # security policy tests
-npm run test:e2e --workspace @sqlpilot/backend  # auth flow against in-memory Mongo
+npm test                # unit tests for every package and the backend
+npm run test:e2e        # backend end-to-end tests (in-memory MongoDB)
+npm run build           # packages, backend and frontend
 ```
 
-## Screenshots
+The PostgreSQL driver tests start a real PostgreSQL server automatically (`embedded-postgres`),
+or use your own by setting `PG_TEST_URL`. The security suite covers `DROP`, `DELETE`, `UPDATE`,
+`INSERT`, `ALTER`, `TRUNCATE`, `SELECT INTO`, nested and comment-hidden SQL, dangerous functions,
+huge and nested `LIMIT`s and stacked statements, and the driver tests check that the database
+itself refuses them.
 
-_Add screenshots of the dashboard, assistant, and results grid here as phases land._
+## Project status
 
-## Future improvements
+SQLPilot is under active development. The core flow works end to end. A security and
+reliability review is being worked through in phases:
 
-- httpOnly-cookie refresh tokens
-- SSO / OAuth login
-- Streaming AI responses over SSE in the assistant UI
-- Query result caching and scheduled queries
-- More engines (SQL Server, BigQuery, Snowflake)
-- Row-level access policies per connection
-- Team workspaces and shared saved queries
+- Done: SQL security (AST validation, real read-only transactions, exact row caps), schema
+  selection, grounded answers, truncation handling, killable SQLite queries, connection policy,
+  proxy handling, password-reset email, deployment hardening.
+- In progress: safe user-facing error messages, connection pooling, minimizing data sent to the
+  AI provider, schema validation of generated SQL, broader MySQL and frontend test coverage.
+
+MySQL support is implemented but has less automated test coverage than PostgreSQL and SQLite.
+[`PROGRESS.md`](./PROGRESS.md) has the detailed history.
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+1. Fork and create a branch.
+2. `npm install && npm run build:packages`, then make your change.
+3. Add or update tests. Anything that touches SQL validation or the drivers needs a test that shows a bad statement being refused.
+4. Run `npm test`, `npm run test:e2e` and `npm run build` before opening the PR.
+
+Please never commit `.env` or real credentials.
+
+## License
+
+[MIT](./LICENSE)

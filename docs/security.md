@@ -17,22 +17,36 @@ AI generation → SQL parser → SQL validation → security policy → user con
 
 1. **Generation** — the model is instructed to emit a single read-only `SELECT` and to set
    `unanswerable: true` rather than invent tables/columns. Output is JSON validated by a Zod schema.
-2. **Parse** — `node-sql-parser` builds an AST for the connection's dialect. On parse failure
-   the validator falls back to a keyword classifier and raises the risk level.
-3. **Validation & policy** (`validateSql`):
-   - String literals and comments are stripped before any keyword scan.
-   - **Always blocked:** `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, `RENAME`,
-     `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`, `CALL`, `EXEC(UTE)`, `PREPARE`, `DEALLOCATE`.
-   - **Blocked unless write mode is on:** `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, `MERGE`, `UPSERT`.
-     Write mode requires `connection.writeEnabled` (ADMIN) **and** `ALLOW_WRITE_QUERIES=true`.
-   - **Rejected:** multiple/stacked statements, `INTO OUTFILE` / `DUMPFILE`, `FOR UPDATE` / `FOR SHARE`.
-   - A `LIMIT <QUERY_MAX_ROWS>` is appended to limit-less `SELECT`s (`normalizedSql`).
-   - Returns `{ valid, statementKind, risk, referencedTables, violations, normalizedSql }`.
+2. **Lex** (`lexSql`) — comments are removed using the target engine's real rules (`#` is a
+   comment only in MySQL, PostgreSQL nests block comments, dollar-quotes and `E''` strings are
+   understood, MySQL `/*! */` bodies are dropped). The cleaned text is what is validated **and**
+   what is executed, so a comment cannot mean one thing to the validator and another to the database.
+3. **Parse and validate** (`validateSql`) — `node-sql-parser` builds an AST for the dialect and a
+   recursive walk applies the policy. **A statement that cannot be parsed is rejected.**
+   - Exactly one statement, and it must be a `SELECT` (or `WITH` over `SELECT`s).
+   - **Always rejected:** DDL, `GRANT`/`REVOKE`, `SET`, `CALL`/`EXEC`, transaction control,
+     `COPY`, `ATTACH`, `PRAGMA`, `SHOW`, and any nested statement (data-modifying CTEs).
+   - **Rejected:** `SELECT ... INTO` (tables, variables, `OUTFILE`/`DUMPFILE`),
+     `FOR UPDATE` / `FOR SHARE`, stacked statements.
+   - **Dangerous functions** are rejected wherever they appear (select list, `FROM`, `WHERE`,
+     subqueries, CTEs), by exact name and by family: file access (`pg_read_file`, `lo_import`,
+     `LOAD_FILE`, `readfile`), outbound connections and code (`dblink*`), session and server
+     control (`pg_terminate_backend`, `set_config`), sleeps and locks (`pg_sleep`, `SLEEP`,
+     `BENCHMARK`, `GET_LOCK`, `pg_advisory_*`), sequences (`nextval`, `setval`), `load_extension`.
+   - `INSERT`/`UPDATE`/`DELETE` are allowed **only** in the manual SQL editor, one statement at a
+     time, when the connection is write-enabled by an ADMIN **and** `ALLOW_WRITE_QUERIES=true`.
+     The AI path is always read-only (`forceReadOnly`).
+   - No `LIMIT` is appended or rewritten. Returns `{ valid, statementKind, risk, referencedTables,
+     referencedColumns, functionsUsed, topLevelLimit, violations, normalizedSql }`.
 4. **User confirmation** — the API requires `confirmed: true` on `/queries/execute`; the UI
    shows the (possibly edited) SQL and the validation verdict first.
-5. **Execution** — per-driver: statement timeout, read-only transaction where supported,
-   hard row cap, pagination. Execution time and row count are recorded to `QueryHistory`
-   and `AuditLog`.
+5. **Execution** — the database enforces read-only itself: PostgreSQL `BEGIN READ ONLY` (with the
+   first snapshot taken so it cannot be switched back), MySQL `START TRANSACTION READ ONLY`,
+   SQLite `query_only`. Drivers also refuse anything that is not `SELECT`/`WITH`/`VALUES`/`TABLE`,
+   because a read-only transaction does not stop `COPY ... PROGRAM` for a superuser. Rows are
+   fetched as `maxRows + 1` (cursor, stream, iterator) so truncation is exact and a huge table is
+   never loaded. SQLite runs in a child process that is killed on timeout or cancellation.
+   Execution time and row count are recorded to `QueryHistory` and `AuditLog`.
 
 ## Authentication
 
@@ -62,5 +76,9 @@ query created/deleted, login, login failed, password changed. String values are 
 
 - Refresh tokens live in `localStorage` in this build — move to an httpOnly cookie for
   production-grade XSS resistance.
-- The SQL policy is deny-by-default but dialect coverage of `node-sql-parser` is not total;
-  the keyword fallback + `LIMIT` wrapper are the backstop. Phase 10 adds a fuzzing pass.
+- Dialect coverage of `node-sql-parser` is not total. Unparseable SQL is rejected (fail closed),
+  which occasionally blocks a legitimate query (for example PostgreSQL `E'...'` strings).
+- Use a dedicated read-only database account. A superuser can do things a read-only transaction
+  does not cover; the connection test warns about this.
+- The host allowlist is checked at connect time, so DNS rebinding between check and connect is
+  not fully closed.
