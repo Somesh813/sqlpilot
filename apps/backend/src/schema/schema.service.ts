@@ -1,6 +1,6 @@
 import { HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { DatabaseDriverError, withDriver } from '@sqlpilot/database';
+import { DatabaseDriverError } from '@sqlpilot/database';
 import {
   AuditAction,
   ConnectionStatus,
@@ -13,6 +13,7 @@ import {
 import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
 import { SafeException } from '../common/errors/safe-exception';
+import { DriverPoolService } from '../database-connections/driver-pool.service';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
 import { SchemaSnapshot, SchemaSnapshotDocument } from './schemas/schema-snapshot.schema';
 
@@ -24,6 +25,7 @@ export class SchemaService {
     @InjectModel(SchemaSnapshot.name) private readonly model: Model<SchemaSnapshotDocument>,
     private readonly connections: DatabaseConnectionsService,
     private readonly audit: AuditService,
+    private readonly pools: DriverPoolService,
   ) {}
 
   /** Returns the cached snapshot, discovering it on first access. */
@@ -59,7 +61,7 @@ export class SchemaService {
 
     let result;
     try {
-      result = await withDriver(config, (driver) => driver.introspect());
+      result = await this.pools.run(connectionId, config, (driver) => driver.introspect());
     } catch (error) {
       const raw = error instanceof DatabaseDriverError ? error.driverError ?? error.message : error instanceof Error ? error.message : String(error);
       this.logger.warn(`Schema discovery failed: ${sanitizeTechnical(raw)}`);

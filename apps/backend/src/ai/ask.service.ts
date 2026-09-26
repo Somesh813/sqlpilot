@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import {
   BadRequestException,
   HttpException,
@@ -13,13 +14,16 @@ import {
   AskResponse,
   ConversationMessageRole,
   GeneratedSql,
+  minimizeResultForLlm,
   QueryResult,
   ResultAnalysis,
+  SafeDatabaseConnection,
   SAFE_MESSAGES,
   SafeErrorCode,
   sanitizeTechnical,
   VisualizationType,
 } from '@sqlpilot/shared';
+import { describeIssues, SchemaIssue } from '@sqlpilot/sql-parser';
 import { safeCodeOf, SafeException } from '../common/errors/safe-exception';
 import { ConversationsService } from '../conversations/conversations.service';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
@@ -30,6 +34,11 @@ interface RequestCtx {
   requestId?: string | null;
   ip?: string | null;
 }
+
+/** Repairs allowed per question, across schema problems and database errors together. */
+const MAX_REPAIRS = 2;
+
+const normalizeSql = (sql: string) => sql.replace(/\s+/g, ' ').replace(/;\s*$/, '').trim().toLowerCase();
 
 const TRY_ASKING = 'Try asking about the data in this database, for example: “Show total sales by month.”';
 
@@ -49,6 +58,7 @@ export class AskService {
     private readonly queries: QueryExecutionService,
     private readonly conversations: ConversationsService,
     private readonly connections: DatabaseConnectionsService,
+    private readonly config: ConfigService,
   ) {}
 
   async ask(userId: string, req: AskRequest, ctx: RequestCtx, viewer: { isAdmin: boolean } = { isAdmin: false }): Promise<AskResponse> {
@@ -62,19 +72,41 @@ export class AskService {
     // shown a previous query, the model tends to extend it (accumulating UNIONs across a chat).
     const recent = req.conversationId ? await this.conversations.recentTurns(userId, conversationId) : [];
     const previousQuestion = [...recent].reverse().find((t) => t.role === 'user')?.content;
-    const history =
-      previousQuestion && (await this.ai.isFollowUp(question, previousQuestion)) ? recent : [];
     const base = this.blank(question, conversationId);
+    const clock = timer();
 
     // ---- 1. understand the question → SQL ----
+    // The follow-up check (a model call) and loading the schema context (database reads) do not
+    // depend on each other, so they run together; generation waits for both.
     let generated: GeneratedSql;
+    let connection: SafeDatabaseConnection;
     try {
-      generated = await this.ai.generate(userId, req.connectionId, question, history, ctx);
+      const [prepared, isFollowUp] = await Promise.all([
+        this.ai.prepareContext(userId, req.connectionId, question, previousQuestion),
+        previousQuestion ? this.ai.isFollowUp(question, previousQuestion) : Promise.resolve(false),
+      ]);
+      connection = prepared.connection;
+      clock.mark('classify+context');
+      generated = await this.ai.generate(userId, req.connectionId, question, isFollowUp ? recent : [], ctx, prepared);
+      clock.mark('generate');
     } catch (error) {
       const detail = this.technical(error);
       this.logger.warn(`Generation failed [${ctx.requestId ?? '-'}]: ${detail}`);
       const code: SafeErrorCode = safeCodeOf(error) ?? 'NOT_UNDERSTOOD';
       return this.fail(userId, base, 'generation', code, viewer.isAdmin ? detail : null);
+    }
+
+    if (generated.blockedByPolicy?.length) {
+      // The model wrote SQL that the safety policy refuses. It is never run, and the user is told
+      // plainly that the request was not a safe read-only question (not "I did not understand").
+      this.logger.warn(`Generated SQL blocked by policy [${ctx.requestId ?? '-'}]: ${generated.blockedByPolicy.join(', ')}`);
+      return this.fail(
+        userId,
+        { ...base, ...this.meta(generated) },
+        'generation',
+        'UNSAFE_QUERY',
+        viewer.isAdmin ? `Blocked by safety policy: ${generated.blockedByPolicy.join(', ')}` : null,
+      );
     }
 
     if (generated.unanswerable || !generated.sql.trim()) {
@@ -90,13 +122,38 @@ export class AskService {
       );
     }
 
-    // ---- 2. run it (one automatic repair attempt if the database rejects it) ----
+    // ---- 2. check it against the schema, run it, and repair it a limited number of times ----
+    // Two kinds of problem are repairable: names that do not exist in the schema (found BEFORE the
+    // query runs) and a statement the database rejects. Both draw on ONE budget, and a repair that
+    // returns SQL we have already tried ends the loop, so it can never spin.
     let sql = generated.sql;
     let autoFixed = false;
+    let repairs = 0;
+    const tried = new Set([normalizeSql(sql)]);
     let result: QueryResult | null = null;
     let failure: { code: SafeErrorCode; detail: string } | null = null;
 
-    for (let attempt = 0; attempt < 2 && !result; attempt++) {
+    const repair = async (problem: string | { issues: SchemaIssue[] }): Promise<boolean> => {
+      if (repairs >= MAX_REPAIRS) return false;
+      repairs++;
+      const fixed = await this.tryRepair(userId, req.connectionId, sql, problem);
+      if (!fixed || tried.has(normalizeSql(fixed))) return false; // no progress
+      tried.add(normalizeSql(fixed));
+      sql = fixed;
+      autoFixed = true;
+      return true;
+    };
+
+    for (;;) {
+      const check = await this.ai.checkSql(userId, req.connectionId, sql, connection);
+      if (!check.ok) {
+        const detail = describeIssues(check.issues).replace(/\n/g, ' ');
+        this.logger.warn(`Schema check failed (repairs so far ${repairs}) [${ctx.requestId ?? '-'}]: ${sanitizeTechnical(detail)}`);
+        failure = { code: 'SCHEMA_MISMATCH', detail };
+        if (await repair({ issues: check.issues })) continue;
+        break;
+      }
+
       try {
         result = await this.queries.execute(
           userId,
@@ -104,23 +161,17 @@ export class AskService {
           { sql, confirmed: true, forceReadOnly: true, prompt: question, conversationId, aiGenerated: true },
           ctx,
         );
+        failure = null;
+        break;
       } catch (error) {
         const detail = this.technical(error);
         const code: SafeErrorCode =
           error instanceof BadRequestException ? 'UNSAFE_QUERY' : (safeCodeOf(error) ?? 'QUERY_FAILED');
-        this.logger.warn(`Execution failed (attempt ${attempt + 1}) [${code}] [${ctx.requestId ?? '-'}]: ${detail}`);
+        this.logger.warn(`Execution failed (repairs so far ${repairs}) [${code}] [${ctx.requestId ?? '-'}]: ${detail}`);
         failure = { code, detail };
-
         // Only a rejected statement is worth repairing. An unreachable database, a timeout or a
         // policy refusal will not be fixed by rewriting the SQL.
-        if (attempt === 0 && code === 'QUERY_FAILED') {
-          const repaired = await this.tryRepair(userId, req.connectionId, sql, detail);
-          if (repaired) {
-            sql = repaired;
-            autoFixed = true;
-            continue;
-          }
-        }
+        if (code === 'QUERY_FAILED' && (await repair(detail))) continue;
         break;
       }
     }
@@ -135,10 +186,12 @@ export class AskService {
       );
     }
 
+    clock.mark('execute');
     // ---- 3. decide how to show it, then say it in words ----
     const columns = result.columns.map((c) => c.name);
     const analysis = this.analyze(columns, result.rows, generated);
     const answer = await this.answer(question, columns, result, analysis);
+    clock.mark('answer');
 
     const response: AskResponse = {
       ...base,
@@ -163,6 +216,8 @@ export class AskService {
     };
 
     await this.remember(userId, conversationId, question, response);
+    clock.mark('save');
+    this.logger.log(`Ask timings [${ctx.requestId ?? '-'}] ${clock.summary()}`);
     return response;
   }
 
@@ -187,9 +242,9 @@ export class AskService {
     }
   }
 
-  private async tryRepair(userId: string, connectionId: string, sql: string, dbError: string): Promise<string | null> {
+  private async tryRepair(userId: string, connectionId: string, sql: string, problem: string | { issues: SchemaIssue[] }): Promise<string | null> {
     try {
-      const fix = await this.ai.fix(userId, connectionId, sql, dbError);
+      const fix = await this.ai.fix(userId, connectionId, sql, problem);
       const fixed = fix.fixedSql?.trim();
       return fixed && fixed !== sql.trim() ? fixed : null;
     } catch (error) {
@@ -220,7 +275,15 @@ export class AskService {
     const fallback = deterministicAnswer(facts);
     if (facts.isEmpty) return fallback; // nothing for a model to add
 
-    const wording = await this.ai.summarize(question, columns, result.rows, {
+    // Privacy mode: nothing from the result leaves the server; the local answer stands.
+    if (!this.config.get<boolean>('ai.sendRowValues', true)) return fallback;
+
+    // The model gets a small scrubbed view (see minimizeResultForLlm), never the result itself.
+    const view = minimizeResultForLlm(columns, result.rows);
+    this.logger.debug(
+      `AI answer payload: rows ${view.rows.length}/${result.rows.length}, columns ${view.columns.length}/${columns.length}, masked ${view.omitted.maskedColumns.length}, secret columns dropped ${view.omitted.secretColumns}, values redacted ${view.omitted.redactedValues}`,
+    );
+    const wording = await this.ai.summarize(question, view, {
       returnedRows: result.returnedRows,
       totalRows: result.totalRows,
       truncated: result.truncated,
@@ -320,4 +383,21 @@ export class AskService {
       error: null,
     };
   }
+}
+
+/** Per-stage wall-clock timings for one request, so slow steps are visible in the log. */
+function timer() {
+  const start = Date.now();
+  let last = start;
+  const stages: Array<[string, number]> = [];
+  return {
+    mark(stage: string) {
+      const now = Date.now();
+      stages.push([stage, now - last]);
+      last = now;
+    },
+    summary() {
+      return `${stages.map(([name, ms]) => `${name}=${ms}ms`).join(' ')} total=${Date.now() - start}ms`;
+    },
+  };
 }

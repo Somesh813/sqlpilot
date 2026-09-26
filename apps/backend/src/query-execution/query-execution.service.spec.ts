@@ -3,11 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { DatabaseType, QueryStatus } from '@sqlpilot/shared';
 import { QueryExecutionService } from './query-execution.service';
 
-jest.mock('@sqlpilot/database', () => ({
-  withDriver: jest.fn(),
-}));
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { withDriver } = jest.requireMock('@sqlpilot/database') as { withDriver: jest.Mock };
+// The service runs queries through the pool service; the driver itself is faked here.
+const withDriver = jest.fn();
 
 describe('QueryExecutionService', () => {
   const connection = {
@@ -42,7 +39,9 @@ describe('QueryExecutionService', () => {
         return values[key];
       },
     } as unknown as ConfigService;
-    service = new QueryExecutionService(connections as never, history as never, audit as never, config);
+    service = new QueryExecutionService(connections as never, history as never, audit as never, config, {
+      run: (_id: string, _cfg: unknown, fn: (d: unknown) => unknown) => withDriver(_cfg, fn),
+    } as never);
   });
 
   describe('validate', () => {

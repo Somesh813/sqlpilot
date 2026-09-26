@@ -17,6 +17,11 @@ export interface AppConfig {
     provider: 'openai' | 'groq';
     timeoutMs: number;
     maxSchemaTables: number;
+    /**
+     * Whether a scrubbed sample of result rows may be sent to the model to word the answer.
+     * false = the answer is built locally from facts and no row value leaves the server.
+     */
+    sendRowValues: boolean;
     /** See OpenAiProviderOptions.structuredOutputMode. */
     structuredOutputMode: 'json_schema' | 'json_object';
     openai: {
@@ -49,6 +54,14 @@ export interface AppConfig {
     /** Number of reverse-proxy hops to trust for the client IP (0 = none). */
     trustProxyHops: number;
   };
+  pool: {
+    /** Connections per external database. */
+    maxConnections: number;
+    /** A pool unused this long is closed (ms). */
+    idleMs: number;
+    /** Pools kept at once across all connections. */
+    maxDrivers: number;
+  };
   mail: {
     transport: 'smtp' | 'file' | 'none';
     smtpUrl: string;
@@ -76,6 +89,7 @@ export default (): AppConfig => ({
     provider: (process.env.AI_PROVIDER as 'openai' | 'groq' | undefined) ?? 'openai',
     timeoutMs: parseInt(process.env.AI_REQUEST_TIMEOUT_MS ?? '45000', 10),
     maxSchemaTables: parseInt(process.env.AI_MAX_SCHEMA_TABLES ?? String(DEFAULTS.AI_MAX_SCHEMA_TABLES), 10),
+    sendRowValues: (process.env.AI_SEND_ROW_VALUES ?? 'true').toLowerCase() !== 'false',
     structuredOutputMode:
       (process.env.AI_STRUCTURED_OUTPUT_MODE as 'json_schema' | 'json_object' | undefined) ?? 'json_schema',
     openai: {
@@ -111,6 +125,11 @@ export default (): AppConfig => ({
         ? process.env.DB_BLOCK_PRIVATE_HOSTS.toLowerCase() === 'true'
         : process.env.NODE_ENV === 'production',
     trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS ?? '0', 10),
+  },
+  pool: {
+    maxConnections: parseInt(process.env.DB_POOL_MAX_CONNECTIONS ?? '5', 10),
+    idleMs: parseInt(process.env.DB_POOL_IDLE_MS ?? '300000', 10),
+    maxDrivers: parseInt(process.env.DB_POOL_MAX_DRIVERS ?? '50', 10),
   },
   mail: {
     // Development defaults to a local outbox; production defaults to "none" and must opt in to SMTP.

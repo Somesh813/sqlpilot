@@ -16,10 +16,16 @@ export class PostgresDriver implements SqlDriver {
       user: config.username,
       password: config.password,
       ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
-      max: 4,
+      max: config.pool?.max ?? 5,
       connectionTimeoutMillis: 8000,
-      idleTimeoutMillis: 10_000,
+      // Idle connections are released after this; the registry closes the whole pool later.
+      idleTimeoutMillis: config.pool?.idleMs ?? 30_000,
+      keepAlive: true,
+      application_name: 'sqlpilot',
     });
+    // An idle connection dropped by the server (restart, network) emits 'error' on the pool. With
+    // no listener, Node treats that as an uncaught exception and the API process dies.
+    this.pool.on('error', () => undefined);
   }
 
   async testConnection(): Promise<TestConnectionResult> {

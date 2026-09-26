@@ -1,4 +1,4 @@
-import { SchemaContext } from '@sqlpilot/shared';
+import { isSelectableForLlm, SchemaContext } from '@sqlpilot/shared';
 
 /**
  * Renders a compact, token-efficient description of the relevant schema.
@@ -12,7 +12,10 @@ export function renderSchemaContext(context: SchemaContext): string {
   lines.push('Tables:');
 
   for (const table of context.tables) {
+    // Secret-holding columns (password hashes, tokens, keys) are not offered, so the model
+    // cannot select them.
     const cols = table.columns
+      .filter((c) => isSelectableForLlm(c.name))
       .map((c) => {
         const flags: string[] = [];
         if (c.isPrimaryKey) flags.push('PK');

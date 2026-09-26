@@ -8,7 +8,7 @@
     "build": "ng build",
     "watch": "ng build --watch --configuration development",
     "test": "ng test --watch=false --browsers=ChromeHeadless",
-    "test:ci": "echo \"Frontend unit tests are introduced in Phase 11 (ng test).\"",
+    "test:ci": "ng test --watch=false --browsers=ChromeHeadless --no-progress",
     "lint": "ng lint"
   },
   "dependencies": {

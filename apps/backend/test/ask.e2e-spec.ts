@@ -115,6 +115,12 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
       CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id),
                            total REAL, status TEXT, created_at TEXT);
     `);
+    db.exec(`
+      CREATE TABLE accounts (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, api_token TEXT, plan TEXT);
+      INSERT INTO accounts (username, password_hash, api_token, plan) VALUES
+        ('ada', '$2b$12$abcdefghijklmnopqrstuv', 'tok_live_ABCDEFGHIJKLMNOP1234', 'pro'),
+        ('grace', '$2b$12$zyxwvutsrqponmlkjihgfe', 'tok_live_QRSTUVWXYZ9876543210', 'free');
+    `);
     db.exec(`INSERT INTO customers (name, city, email) VALUES
       ('Ada','Mumbai','ada@x.com'),('Grace','Mumbai','grace@x.com'),('Linus','Pune','linus@x.com'),
       ('Alan','Delhi','alan@x.com')`);
@@ -270,7 +276,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     expect(res.body.rows).toEqual([{ total_customers: 4 }]);
   });
 
-  it('a DB error is repaired automatically once and the real result is returned', async () => {
+  it('a misspelt column is caught before running and repaired, and the real result is returned', async () => {
     provider.generated = [gen('SELECT nme FROM customers')]; // typo → DB error
     provider.fixes = [{ fixedSql: 'SELECT name FROM customers', diagnosis: 'typo', changes: [], confidence: 0.9 }];
     const res = await ask('List customer names').expect(200);
@@ -280,9 +286,22 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     expect(res.body.returnedRows).toBe(4);
   });
 
-  it('an unrepairable DB error → friendly message + technical detail, not a blank reply', async () => {
-    provider.generated = [gen('SELECT nme FROM customers')];
-    provider.fixes = [{ fixedSql: 'SELECT still_wrong FROM customers', diagnosis: 'x', changes: [], confidence: 0.1 }];
+  it('a runtime DB error the schema check cannot see is still repaired via the database error', async () => {
+    provider.generated = [gen("SELECT json_extract(name, '$.a') AS a FROM customers")]; // names are not JSON: a runtime error
+    provider.fixes = [{ fixedSql: 'SELECT name FROM customers', diagnosis: 'not json', changes: [], confidence: 0.9 }];
+    const res = await ask('List customer names').expect(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.autoFixed).toBe(true);
+    const fixPrompt = provider.calls.filter((c) => c.name === 'sql_fix').map((c) => c.messages.map((m) => m.content).join(' '))[0];
+    expect(fixPrompt).toMatch(/Database error/);
+  });
+
+  it('an unrepairable runtime DB error gives a friendly message and no technical detail to a normal user', async () => {
+    provider.generated = [gen("SELECT json_extract(name, '$.a') AS a FROM customers")];
+    provider.fixes = [
+      { fixedSql: "SELECT json_extract(city, '$.b') AS b FROM customers", diagnosis: 'x', changes: [], confidence: 0.1 },
+      { fixedSql: "SELECT json_extract(email, '$.c') AS c FROM customers", diagnosis: 'x', changes: [], confidence: 0.1 },
+    ];
     const res = await ask('List customer names').expect(200);
     expect(res.body.success).toBe(false);
     expect(res.body.error.stage).toBe('execution');
@@ -342,10 +361,160 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     expect(provider.calls.slice(before).map((c) => c.name)).not.toContain('result_answer');
   });
 
+  describe('F16: generated SQL is checked against the schema before it runs', () => {
+    const fixPrompts = () => provider.calls.filter((c) => c.name === 'sql_fix').map((c) => c.messages.map((m) => m.content).join('\n'));
+    const fix = (sql: string) => ({ fixedSql: sql, diagnosis: 'x', changes: [], confidence: 0.8 });
+
+    it('a hallucinated table is repaired using a structured problem with the closest real name', async () => {
+      provider.generated = [gen('SELECT name FROM custmers')];
+      provider.fixes = [fix('SELECT name FROM customers')];
+      const res = await ask('List customer names').expect(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.autoFixed).toBe(true);
+      expect(res.body.sql).toBe('SELECT name FROM customers');
+      expect(fixPrompts()).toHaveLength(1);
+      expect(fixPrompts()[0]).toContain('The query was NOT run');
+      expect(fixPrompts()[0]).toContain('Table "custmers" does not exist');
+      expect(fixPrompts()[0]).toContain('Did you mean: customers');
+    });
+
+    it('a hallucinated column says where the real one lives (a table that may need joining)', async () => {
+      provider.generated = [gen('SELECT c.name, o.city FROM customers c JOIN orders o ON o.customer_id = c.id')];
+      provider.fixes = [fix('SELECT c.name, c.city FROM customers c')];
+      const res = await ask('Names with cities').expect(200);
+      expect(res.body.success).toBe(true);
+      expect(fixPrompts()[0]).toContain('Column "city" does not exist in table "orders"');
+      expect(fixPrompts()[0]).toContain('exists in: customers');
+    });
+
+    it('the repaired SQL is checked again: a second bad repair is repaired once more, then it works', async () => {
+      provider.generated = [gen('SELECT name FROM custmers')];
+      provider.fixes = [fix('SELECT nme FROM customers'), fix('SELECT name FROM customers')];
+      const res = await ask('List customer names').expect(200);
+      expect(res.body.success).toBe(true);
+      expect(fixPrompts()).toHaveLength(2);
+      expect(fixPrompts()[1]).toContain('Column "nme" does not exist');
+    });
+
+    it('stops after two repairs and never loops, even when more fixes are on offer', async () => {
+      provider.generated = [gen('SELECT name FROM custmers')];
+      provider.fixes = [fix('SELECT name FROM cust'), fix('SELECT name FROM custs'), fix('SELECT name FROM customers')];
+      const res = await ask('List customer names').expect(200);
+      expect(fixPrompts()).toHaveLength(2);
+      expect(provider.fixes).toHaveLength(1); // the third was never requested
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('SCHEMA_MISMATCH');
+      expect(res.body.error.message).toMatch(/could not match that request/i);
+      expect(res.body.rows).toEqual([]);
+    });
+
+    it('stops at once when a repair makes no progress (returns the same SQL)', async () => {
+      provider.generated = [gen('SELECT nme FROM customers')];
+      provider.fixes = [fix('SELECT nme FROM customers'), fix('SELECT name FROM customers')];
+      const res = await ask('List customer names').expect(200);
+      expect(fixPrompts()).toHaveLength(1);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('SCHEMA_MISMATCH');
+    });
+
+    it('a repair that goes back to SQL already tried is treated as no progress', async () => {
+      provider.generated = [gen('SELECT nme FROM customers')];
+      provider.fixes = [fix('SELECT nam FROM customers'), fix('SELECT   nme  FROM customers;')];
+      const res = await ask('List customer names').expect(200);
+      expect(fixPrompts()).toHaveLength(2);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('the schema-repair budget is shared with database-error repairs (two in total)', async () => {
+      provider.generated = [gen('SELECT nme FROM customers')];
+      provider.fixes = [
+        fix("SELECT json_extract(name, '$.a') AS a FROM customers"),
+        fix("SELECT json_extract(city, '$.b') AS b FROM customers"),
+        fix('SELECT name FROM customers'),
+      ];
+      const res = await ask('List customer names').expect(200);
+      expect(fixPrompts()).toHaveLength(2);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('QUERY_FAILED');
+    });
+
+    it('system tables are not queryable through the assistant', async () => {
+      provider.generated = [gen('SELECT name FROM sqlite_master')];
+      provider.fixes = [];
+      const res = await ask('What tables exist?').expect(200);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('SCHEMA_MISMATCH');
+      expect(res.body.rows).toEqual([]);
+    });
+
+    it('valid multi-table SQL is not delayed or altered by the check', async () => {
+      provider.generated = [
+        gen('SELECT c.name, SUM(o.total) AS spend FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.name ORDER BY spend DESC'),
+      ];
+      const res = await ask('Top customers by spending').expect(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.autoFixed).toBe(false);
+      expect(fixPrompts()).toHaveLength(0);
+    });
+
+    it('an ordinary user gets no technical detail about which names were wrong', async () => {
+      provider.generated = [gen('SELECT nme FROM customers')];
+      provider.fixes = [];
+      const res = await ask('List customer names').expect(200);
+      expect(res.body.error.technical).toBeNull();
+    });
+  });
+
+  describe('F15: what is sent to the model', () => {
+    const lastCall = (name: string) => [...provider.calls].reverse().find((c) => c.name === name)!;
+    const promptText = (name: string) => lastCall(name).messages.map((m) => m.content).join('\n---\n');
+
+    it('the SQL model is never shown secret-holding columns, so it cannot select them', async () => {
+      provider.generated = [gen('SELECT username, plan FROM accounts')];
+      await ask('Which plan is each account on?').expect(200);
+      const prompt = promptText('generated_sql');
+      expect(prompt).toContain('accounts');
+      expect(prompt).toContain('username');
+      expect(prompt).not.toMatch(/password_hash|api_token/);
+    });
+
+    it('SELECT * on a table with secrets: the user sees the real rows, the answer model does not', async () => {
+      provider.generated = [gen('SELECT * FROM accounts')];
+      provider.answers = ['There are 2 accounts.'];
+      const res = await ask('Show all accounts').expect(200);
+      expect(res.body.rows[0].password_hash).toMatch(/^\$2b\$/); // the user's own data is untouched
+      const sent = promptText('result_answer');
+      expect(sent).not.toMatch(/\$2b\$|tok_live|password_hash|api_token/);
+      expect(sent).toContain('ada');
+    });
+
+    it('contact details are shown to the user but only placeholders reach the answer model', async () => {
+      provider.generated = [gen('SELECT name, email FROM customers ORDER BY name')];
+      const res = await ask('List customers with their email').expect(200);
+      expect(res.body.rows[0].email).toBe('ada@x.com');
+      const sent = promptText('result_answer');
+      expect(sent).not.toMatch(/@x\.com/);
+      expect(sent).toContain('[hidden]');
+    });
+
+    it('a follow-up sends the earlier SQL but never the earlier answer (which quotes result data)', async () => {
+      provider.generated = [gen("SELECT name, city FROM customers WHERE city = 'Mumbai'")];
+      provider.answers = ['Ada and Grace live in Mumbai.'];
+      const first = await ask('Show customers from Mumbai').expect(200);
+      provider.followUps = [true];
+      provider.generated = [gen("SELECT name FROM customers WHERE city = 'Mumbai' LIMIT 1")];
+      await ask('Only the first one', first.body.conversationId).expect(200);
+      const prompt = promptText('generated_sql');
+      expect(prompt).toContain("WHERE city = 'Mumbai'"); // the query is what a refinement needs
+      expect(prompt).not.toContain('Ada and Grace live in Mumbai');
+    });
+  });
+
+
   describe('F11/F12: failures are safe for users and never leak internals', () => {
     const LEAKY_429 =
       'groq request failed (429): 429 Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01abcXYZ789` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 7900. Please try again in 2.5s.';
-    const FORBIDDEN = /org_01abcXYZ789|groq|gpt-oss|on_demand|Limit 8000|tokens per minute|stack|\bat\s+\S+\s+\(|[A-Z]:\|\/home\/|\/etc\/|ECONN|password/i;
+    const FORBIDDEN = /org_01abcXYZ789|groq|gpt-oss|on_demand|Limit 8000|tokens per minute|stack|\bat\s+\S+\s+\(|[A-Z]:\\|\/home\/|\/etc\/|ECONN|password/i;
 
     let adminToken: string;
     let adminConnectionId: string;
@@ -390,6 +559,36 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
       expect(res.body.error.message).toBe('AI service is temporarily busy. Please try again in a moment.');
       expect(res.body.error.technical).toBe('AI provider error: RATE_LIMITED (HTTP 429)');
       expect(JSON.stringify(res.body)).not.toMatch(FORBIDDEN);
+    });
+
+    it('one unusable model response is retried transparently and the user still gets the answer', async () => {
+      const { AiProviderError } = await import('@sqlpilot/ai');
+      provider.generateError = new AiProviderError('400 Failed to validate JSON', undefined, true, 'BAD_RESPONSE', 400);
+      provider.generated = [gen('SELECT COUNT(*) AS n FROM customers')];
+      provider.answers = ['There are 4 customers.'];
+      const res = await ask('How many customers are there?').expect(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.rows).toEqual([{ n: 4 }]);
+      expect(provider.calls.filter((c) => c.name === 'generated_sql')).toHaveLength(2);
+    });
+
+    it('two unusable responses in a row give the friendly message, after exactly one retry', async () => {
+      const { AiProviderError } = await import('@sqlpilot/ai');
+      let n = 0;
+      const original = provider.completeStructured.bind(provider);
+      provider.completeStructured = (async (req: never, schema: never, name: string) => {
+        if (name === 'generated_sql') {
+          n++;
+          throw new AiProviderError('400 Failed to validate JSON', undefined, true, 'BAD_RESPONSE', 400);
+        }
+        return original(req, schema, name);
+      }) as never;
+      const res = await ask('Show all customers').expect(200);
+      provider.completeStructured = original as never;
+      expect(n).toBe(2);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('AI_BAD_RESPONSE');
+      expect(res.body.error.message).toBe('I could not turn that into a query. Try rephrasing your question.');
     });
 
     it.each([

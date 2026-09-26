@@ -7,7 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DatabaseDriverError, withDriver } from '@sqlpilot/database';
+import { DatabaseDriverError } from '@sqlpilot/database';
 import {
   AuditAction,
   QueryResult,
@@ -19,6 +19,7 @@ import {
 import { validateSql } from '@sqlpilot/sql-parser';
 import { AuditService } from '../audit/audit.service';
 import { SafeException } from '../common/errors/safe-exception';
+import { DriverPoolService } from '../database-connections/driver-pool.service';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
 import { QueryHistoryService } from '../query-history/query-history.service';
 
@@ -49,6 +50,7 @@ export class QueryExecutionService {
     private readonly history: QueryHistoryService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    private readonly pools: DriverPoolService,
   ) {}
 
   async validate(userId: string, connectionId: string, sql: string): Promise<SqlValidationResult> {
@@ -102,7 +104,7 @@ export class QueryExecutionService {
     }
 
     try {
-      const result = await withDriver(config, (driver) =>
+      const result = await this.pools.run(connectionId, config, (driver) =>
         driver.runQuery(validation.normalizedSql, {
           timeoutMs,
           maxRows,

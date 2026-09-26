@@ -19,6 +19,7 @@ import {
 import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
 import { EncryptionService } from '../common/services/encryption.service';
+import { DriverPoolService } from './driver-pool.service';
 import {
   assertHostAllowed,
   assertSqlitePathAllowed,
@@ -58,6 +59,7 @@ export class DatabaseConnectionsService {
     private readonly encryption: EncryptionService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    private readonly pools: DriverPoolService,
   ) {}
 
   async list(userId: string): Promise<SafeDatabaseConnection[]> {
@@ -158,6 +160,7 @@ export class DatabaseConnectionsService {
     if (doc.type === DatabaseType.SQLITE) doc.filePath = checked.filePath ?? doc.filePath;
     doc.status = ConnectionStatus.DISCONNECTED;
     await doc.save();
+    this.pools.invalidate(id); // the old credentials/host must not keep serving queries
 
     await this.audit.record({
       userId,
@@ -179,6 +182,7 @@ export class DatabaseConnectionsService {
       userId: new Types.ObjectId(userId),
     });
     if (res.deletedCount === 0) throw new NotFoundException('Connection not found.');
+    this.pools.invalidate(id);
     await this.audit.record({
       userId,
       action: AuditAction.CONNECTION_DELETED,

@@ -78,10 +78,16 @@ export class ConversationsService {
       .exec();
     return messages
       .reverse()
-      .map((m) => ({
-        role: m.role === ConversationMessageRole.ASSISTANT ? ('assistant' as const) : ('user' as const),
-        content: m.sql ? `${m.content}\n\nSQL:\n${m.sql}` : m.content,
-      }));
+      .map((m) =>
+        m.role === ConversationMessageRole.ASSISTANT
+          ? {
+              role: 'assistant' as const,
+              // The written answer quotes result data (names, amounts, emails). The model only
+              // needs the query it wrote, to refine it, so the answer text never goes back out.
+              content: m.sql ? `SQL:\n${m.sql}` : '(no query was run)',
+            }
+          : { role: 'user' as const, content: m.content },
+      );
   }
 
   async append(userId: string, id: string, input: AppendMessageInput): Promise<SharedMessage> {

@@ -63,6 +63,7 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
 
   @ViewChild('scroller') scroller?: ElementRef<HTMLDivElement>;
+  @ViewChild('questionInput') questionInput?: ElementRef<HTMLInputElement>;
 
   /** 'chat' is the product: ask in plain English. 'editor' is the advanced SQL view. */
   readonly mode = signal<'chat' | 'editor'>('chat');
@@ -163,6 +164,11 @@ export class WorkspaceComponent implements OnInit, OnDestroy {
 
     this.chat.update((c) => [...c, { role: 'user', text: q }]);
     this.question.set('');
+    // ngModel only rewrites the box when its bound value changes between two change-detection runs.
+    // Typing and pressing Enter in one burst (fast typing, paste-then-Enter) can leave the box
+    // showing the old question while the model says '', and the next question then gets glued to
+    // it. Clearing the element itself removes that dependence.
+    if (this.questionInput) this.questionInput.nativeElement.value = '';
     this.startProgress();
     this.scrollDown();
 

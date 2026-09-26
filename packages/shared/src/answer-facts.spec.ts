@@ -1,4 +1,4 @@
-import { buildResultFacts, deterministicAnswer, extractNumericClaims, verifyAnswer } from './answer-facts';
+import { buildResultFacts, deterministicAnswer, extractNumericClaims, superlativeMismatch, verifyAnswer } from './answer-facts';
 
 type Row = Record<string, unknown>;
 const facts = (
@@ -157,5 +157,50 @@ describe('extractNumericClaims', () => {
     const claims = extractNumericClaims('Three customers spent 1,25,000 and 2.5 lakh, the 1st being 40%.').map((c) => c.value);
     expect(claims).toEqual(expect.arrayContaining([3, 125000, 250000, 40]));
     expect(claims).not.toContain(1);
+  });
+});
+
+describe('superlative claims must name the row that really holds the extreme', () => {
+  const products = facts(['name', 'price'], [
+    { name: 'Phone', price: 30000 },
+    { name: 'Laptop', price: 60000 },
+    { name: 'Novel', price: 500 },
+  ]);
+
+  it('accepts the right item for highest and lowest', () => {
+    expect(ok('The most expensive product is Laptop at 60,000.', products).ok).toBe(true);
+    expect(ok('The cheapest item is the Novel, at 500.', products).ok).toBe(true);
+  });
+
+  it('rejects a real item paired with the wrong extreme (both numbers exist in the data)', () => {
+    const r = ok('The most expensive product is Phone at 30,000.', products);
+    expect(r.ok).toBe(false);
+    expect(r.problems).toContain('superlative_mismatch:Phone');
+    expect(ok('The cheapest product is Laptop.', products).ok).toBe(false);
+  });
+
+  it('skips sentences that name several items or no item, and does not police plain lists', () => {
+    expect(ok('The top 2 are Laptop and Phone.', products, 'show the top 2').ok).toBe(true);
+    expect(ok('Prices range from 500 to 60,000.', products).ok).toBe(true);
+    expect(ok('Laptop costs 60,000, Phone 30,000 and Novel 500.', products).ok).toBe(true);
+  });
+
+  it('accepts ties, and a claim that holds for any measure column', () => {
+    const tie = facts(['name', 'score'], [{ name: 'A', score: 9 }, { name: 'B', score: 9 }, { name: 'C', score: 1 }]);
+    expect(ok('The highest score belongs to B.', tie).ok).toBe(true);
+    const multi = facts(['name', 'revenue', 'orders'], [{ name: 'A', revenue: 100, orders: 1 }, { name: 'B', revenue: 50, orders: 9 }]);
+    expect(ok('B has the most orders.', multi).ok).toBe(true);
+    expect(ok('A has the highest revenue.', multi).ok).toBe(true);
+  });
+
+  it('does not judge a partial result (the real extreme may not be in the sample)', () => {
+    const rows = Array.from({ length: 1000 }, (_, i) => ({ name: `Item ${i}`, v: i }));
+    const partial = facts(['name', 'v'], rows, { truncated: true, totalRows: null, returnedRows: 1000 });
+    expect(superlativeMismatch('The highest is Item 3.', partial)).toBeNull();
+  });
+
+  it('a longer name containing a shorter one is one item, not two', () => {
+    const f = facts(['name', 'price'], [{ name: 'Phone', price: 100 }, { name: 'Phone Pro', price: 900 }]);
+    expect(ok('The most expensive is Phone Pro.', f).ok).toBe(true);
   });
 });

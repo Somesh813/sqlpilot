@@ -113,6 +113,11 @@ export interface GeneratedSql {
   /** Set when the schema cannot answer the question. */
   unanswerable: boolean;
   unanswerableReason: string | null;
+  /**
+   * Set when the model's SQL was refused by the safety policy before it could run. Holds the
+   * violation codes (for example DDL_BLOCKED); the SQL itself is withheld.
+   */
+  blockedByPolicy?: string[] | null;
   visualization: {
     recommended: boolean;
     type: VisualizationType;

@@ -113,10 +113,12 @@ all-zero encryption keys, and MongoDB URLs without credentials.
 | `AI_PROVIDER` | | `openai` (default) or `groq` |
 | `OPENAI_API_KEY` / `GROQ_API_KEY` | prod | Key for the selected provider. Without it, AI routes answer 503 |
 | `OPENAI_MODEL`, `OPENAI_MODEL_FAST`, `GROQ_MODEL`, `GROQ_MODEL_FAST` | | Model ids |
+| `AI_SEND_ROW_VALUES` | | `true` (default) lets a scrubbed sample of each result reach the AI provider to word the answer; `false` sends no result values at all |
 | `AI_MAX_SCHEMA_TABLES` | | Tables sent to the model before narrowing kicks in (default `25`) |
 | `QUERY_TIMEOUT_MS` | | Per-query timeout (default `15000`) |
 | `QUERY_MAX_ROWS` | | Row cap (default `1000`) |
 | `ALLOW_WRITE_QUERIES` | | Global kill switch for writes in the SQL editor (default `false`) |
+| `DB_POOL_MAX_CONNECTIONS`, `DB_POOL_IDLE_MS`, `DB_POOL_MAX_DRIVERS` | | Persistent pool per database connection: size (default `5`), idle close time (default 5 min), pools kept (default `50`) |
 | `SQLITE_ALLOWED_DIRS` | | Comma-separated directories SQLite files must live in (default `./data/sqlite`) |
 | `DB_ALLOWED_HOSTS` | | Optional allowlist of database hosts: names, `*.suffix`, IPs, CIDRs |
 | `DB_BLOCK_PRIVATE_HOSTS` | | Refuse loopback, private and cloud-metadata addresses. Defaults to `true` in production |
@@ -150,11 +152,13 @@ that each stand on their own.
 | --- | --- |
 | AST validation | One statement only, and it must be a `SELECT` or a `WITH` over `SELECT`s. Rejects `INSERT`, `UPDATE`, `DELETE`, DDL, `GRANT`/`REVOKE`, `SELECT INTO`, `FOR UPDATE`, nested data-modifying CTEs, and about 100 dangerous functions (`pg_read_file`, `lo_import`, `dblink`, `pg_sleep`, `nextval`, `LOAD_FILE`, `SLEEP`, `load_extension` and more). Anything it cannot parse is rejected. |
 | Dialect-aware lexing | Comments are removed using each engine's real rules (`#` in MySQL, nested comments in PostgreSQL, dollar-quotes). The text that is validated is exactly the text that runs. |
-| Database-enforced read-only | PostgreSQL `BEGIN READ ONLY`, MySQL `START TRANSACTION READ ONLY`, SQLite `query_only`. A last-line check also refuses `COPY … PROGRAM`, which a read-only transaction does not stop for a superuser. |
+| Database-enforced read-only | PostgreSQL `BEGIN READ ONLY` (refuses all writes and DDL), SQLite `query_only` and a read-only file handle, MySQL `START TRANSACTION READ ONLY`. **MySQL's read-only transaction refuses DML but not DDL** (verified on 8.0.43: `DROP`, `CREATE`, `TRUNCATE` and `ALTER` succeed inside it), so on MySQL the AST validator and a driver check that only `SELECT`/`WITH` statements are sent carry that load. That check also refuses `COPY … PROGRAM` on PostgreSQL. For MySQL, connect with an account that has only `SELECT`. |
+| Schema validation | Before an AI-written query runs, every table and column it names is checked against the connection's real schema (aliases, CTEs and subqueries understood; system catalogs and other schemas refused). A miss is sent back to the model as a structured problem with close matches and where the column actually lives, for at most two repairs in total, and each repair is checked again. A repair that repeats earlier SQL ends the loop. |
 | Resource limits | Statement timeout, row cap by fetching `limit + 1`, and SQLite queries in a child process that is killed on timeout so a heavy query cannot freeze the API. |
 | Connection policy | SQLite files only inside approved directories (symlinks resolved, one uniform error). Network hosts checked against an allowlist or blocked if private, loopback or metadata. Errors shown to users are generic. |
 | Credentials | Encrypted with AES-256-GCM at rest, decrypted only in the backend, never returned. Passwords hashed with bcrypt. |
 | Auth | Short-lived access tokens, rotating refresh tokens with reuse detection, per-client rate limits that work behind a reverse proxy. |
+| AI data minimisation | The model sees the schema (names and types only, never values), the question, and the earlier SQL, not earlier answers. For wording an answer it gets at most 20 rows, 10 columns and 60-character cells, with secret columns dropped, identifier columns dropped, contact and identity columns shown as `[hidden]`, and credential-, card-, phone- and email-shaped values scrubbed. A final guard removes anything credential-shaped from every outbound request. The full result never leaves the server. |
 | Answer grounding | Numbers and "no results" claims in the AI's answer are checked against the data. A wrong answer is replaced by a deterministic one. |
 | Deployment | No default secrets, no published database or API ports, internal Docker network, read-only backend container. |
 
@@ -231,16 +235,26 @@ Expected failures (not understood, unsafe SQL, database error) come back as `200
 ## Testing
 
 ```bash
-npm test                # unit tests for every package and the backend
-npm run test:e2e        # backend end-to-end tests (in-memory MongoDB)
+npm test                # unit + integration tests for every package and the backend
+npm run test:e2e        # backend end-to-end tests (in-memory MongoDB, real SQLite)
+npm run test:frontend   # Angular component tests in headless Chrome
+npm run test:all        # all of the above
 npm run build           # packages, backend and frontend
 ```
 
-The PostgreSQL driver tests start a real PostgreSQL server automatically (`embedded-postgres`),
-or use your own by setting `PG_TEST_URL`. The security suite covers `DROP`, `DELETE`, `UPDATE`,
-`INSERT`, `ALTER`, `TRUNCATE`, `SELECT INTO`, nested and comment-hidden SQL, dangerous functions,
-huge and nested `LIMIT`s and stacked statements, and the driver tests check that the database
-itself refuses them.
+- **PostgreSQL and MySQL are tested against real servers.** The driver tests start them automatically
+  (`embedded-postgres`, `mysql-memory-server`; the first MySQL run downloads the server binary), or use
+  your own with `PG_TEST_URL=postgres://user:pw@host:port/db` and `MYSQL_TEST_URL=mysql://user:pw@host:port/db`.
+  Use throwaway databases: the tests create and drop tables.
+- **Security suite:** `DROP`, `DELETE`, `UPDATE`, `INSERT`, `ALTER`, `TRUNCATE`, `SELECT INTO`, nested and
+  comment-hidden SQL, dangerous functions, huge and nested `LIMIT`s and stacked statements, checked at the
+  parser, at each database driver, and through the whole HTTP stack, including with writes globally enabled.
+- **Data suite:** 0, 1, 999, 1,000, 1,001 and 1,500 rows, NULLs, dates, exact decimals, rupee amounts and Hindi text on all three engines.
+- **AI scenarios:** multi-hop joins over a 5-table database, a missing intermediate table, hallucinated tables
+  and columns, follow-ups that filter and un-filter, and contradictory answers, with expected numbers computed
+  independently of the pipeline.
+- **Frontend:** table, chart, KPI, loading, error, empty, truncated and wide-table states, plus the ask flow.
+  Set `CHROME_BIN` if Chrome is not on the default path.
 
 ## Project status
 
@@ -249,12 +263,14 @@ reliability review is being worked through in phases:
 
 - Done: SQL security (AST validation, real read-only transactions, exact row caps), schema
   selection, grounded answers, truncation handling, killable SQLite queries, connection policy,
-  proxy handling, password-reset email, deployment hardening.
-- In progress: safe user-facing error messages, connection pooling, minimizing data sent to the
-  AI provider, schema validation of generated SQL, broader MySQL and frontend test coverage.
+  proxy handling, password-reset email, deployment hardening, safe error messages, persistent
+  connection pools, data minimisation for the AI provider, schema validation of generated SQL,
+  and a broad test suite (PostgreSQL, MySQL and SQLite against real servers, plus frontend tests).
+- Open: see the list in the acceptance document (notably lint is not set up, database TLS
+  certificates are not verified, and Docker has not been run end to end).
 
-MySQL support is implemented but has less automated test coverage than PostgreSQL and SQLite.
-[`PROGRESS.md`](./PROGRESS.md) has the detailed history.
+MySQL is tested against a real server, but a MySQL read-only transaction does not stop DDL, so use a SELECT-only account.
+[`docs/acceptance.md`](./docs/acceptance.md) lists every audit finding with its proof and the known open items; [`PROGRESS.md`](./PROGRESS.md) has the detailed history.
 
 ## Contributing
 

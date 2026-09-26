@@ -40,7 +40,7 @@ AI generation → SQL parser → SQL validation → security policy → user con
      referencedColumns, functionsUsed, topLevelLimit, violations, normalizedSql }`.
 4. **User confirmation** — the API requires `confirmed: true` on `/queries/execute`; the UI
    shows the (possibly edited) SQL and the validation verdict first.
-5. **Execution** — the database enforces read-only itself: PostgreSQL `BEGIN READ ONLY` (with the
+5. **Execution** — the database enforces read-only itself (with one MySQL exception, below): PostgreSQL `BEGIN READ ONLY` (with the
    first snapshot taken so it cannot be switched back), MySQL `START TRANSACTION READ ONLY`,
    SQLite `query_only`. Drivers also refuse anything that is not `SELECT`/`WITH`/`VALUES`/`TABLE`,
    because a read-only transaction does not stop `COPY ... PROGRAM` for a superuser. Rows are
@@ -71,6 +71,15 @@ AI generation → SQL parser → SQL validation → security policy → user con
 deleted/tested, schema refreshed, AI SQL generated, query validated/executed/blocked, saved
 query created/deleted, login, login failed, password changed. String values are run through
 `redactSecrets()` before persistence.
+
+## MySQL read-only limitation (verified)
+
+On MySQL 8.0.43 a `START TRANSACTION READ ONLY` transaction rejects `INSERT`/`UPDATE`/`DELETE`
+but **allows DDL** (`DROP TABLE`, `CREATE TABLE`, `TRUNCATE`, `ALTER TABLE` all succeeded in a
+test), because DDL commits implicitly. On MySQL the protection against DDL is therefore the AST
+validator, the driver's statement-shape check (only `SELECT`/`WITH`/`VALUES`/`TABLE`), and
+`multipleStatements: false`, not the database. Use an account with only `SELECT` for MySQL
+connections; the connection test warns when the account can write or administer.
 
 ## Known limitations (tracked)
 

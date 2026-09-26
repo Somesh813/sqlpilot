@@ -243,10 +243,53 @@ export function verifyAnswer(answer: string, facts: ResultFacts, question = ''):
     if (!stated) problems.push('single_value_not_stated');
   }
 
+  // "The most expensive product is Phone" must name the row that really has the maximum.
+  const wrong = superlativeMismatch(text, facts);
+  if (wrong) problems.push(`superlative_mismatch:${wrong}`);
+
   // Do not present a partial result as complete.
   if (facts.truncated && facts.totalRows === null && CLAIMS_TOTAL.test(text)) {
     problems.push('total_claimed_for_partial_result');
   }
 
   return { ok: problems.length === 0, problems };
+}
+
+const HIGH_WORDS = /\b(highest|most|largest|biggest|greatest|maximum|max|top|best|leading|priciest|costliest)\b/i;
+const LOW_WORDS = /\b(lowest|least|smallest|cheapest|minimum|min|worst|fewest|bottom|weakest)\b/i;
+
+/**
+ * Checks sentences that name ONE item as the highest/lowest. The item must be the row holding the
+ * extreme value of some measure column. Sentences naming several items ("the top 3 are A, B, C")
+ * are skipped, as are partial results (the true extreme may not be in the sample).
+ * Returns the offending label, or null.
+ */
+export function superlativeMismatch(text: string, facts: ResultFacts): string | null {
+  const { labelColumn, measureColumns, rows } = facts;
+  if (!labelColumn || measureColumns.length === 0 || rows.length < 2 || facts.truncated) return null;
+
+  const labels = [...new Set(rows.map((r) => r[labelColumn]).filter((v): v is string => typeof v === 'string' && v.trim().length >= 2))];
+  if (labels.length < 2) return null;
+
+  for (const sentence of text.split(/[.!?;\n]+/)) {
+    const high = HIGH_WORDS.test(sentence);
+    const low = LOW_WORDS.test(sentence);
+    if (high === low) continue; // no superlative, or contradictory words: nothing to check
+
+    const lower = sentence.toLowerCase();
+    const named = labels.filter((l) => lower.includes(l.toLowerCase()));
+    // a label that is a prefix of a longer named label ("Phone" in "Phone Pro") is not a second item
+    const distinct = named.filter((l) => !named.some((o) => o !== l && o.toLowerCase().includes(l.toLowerCase())));
+    if (distinct.length !== 1) continue;
+
+    const label = distinct[0];
+    const holdsExtreme = measureColumns.some((col) => {
+      const values = rows.map((r) => Number(r[col])).filter(Number.isFinite);
+      if (values.length < 2) return false;
+      const target = high ? Math.max(...values) : Math.min(...values);
+      return rows.some((r) => r[labelColumn] === label && Number(r[col]) === target);
+    });
+    if (!holdsExtreme) return label;
+  }
+  return null;
 }

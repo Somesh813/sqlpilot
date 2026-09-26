@@ -8,6 +8,7 @@ import {
   OpenAiProvider,
 } from '@sqlpilot/ai';
 import { AppConfig } from '../config/configuration';
+import { PrivacyGuardProvider } from './privacy-guard.provider';
 
 export const AI_PROVIDER = Symbol('AI_PROVIDER');
 
@@ -36,6 +37,12 @@ class DisabledAiProvider implements AiProvider {
  * pointed at a different base URL and key. Switch with `AI_PROVIDER=openai|groq`.
  */
 export function aiProviderFactory(config: ConfigService): AiProvider {
+  const provider = buildProvider(config);
+  // Every real provider sits behind the privacy guard; the disabled one sends nothing.
+  return provider instanceof DisabledAiProvider ? provider : new PrivacyGuardProvider(provider);
+}
+
+function buildProvider(config: ConfigService): AiProvider {
   const logger = new Logger('AiProvider');
   const ai = config.get<AppConfig['ai']>('ai')!;
 

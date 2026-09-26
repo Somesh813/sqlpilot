@@ -18,6 +18,8 @@ export interface DriverConfig {
   filePath?: string;
   ssl?: boolean;
   options?: Record<string, string | number | boolean>;
+  /** Connection pool sizing for PostgreSQL / MySQL. */
+  pool?: { max?: number; idleMs?: number };
 }
 
 export interface RunQueryOptions {

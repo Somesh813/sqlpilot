@@ -9,3 +9,5 @@ export { inspectAst } from './ast-inspect';
 export type { AstFacts } from './ast-inspect';
 export { toParserDialect } from './dialect';
 export type { ParserDialect } from './dialect';
+export { checkAgainstSchema, describeIssues, closest } from './schema-check';
+export type { SchemaCheck, SchemaIssue, SchemaLike } from './schema-check';

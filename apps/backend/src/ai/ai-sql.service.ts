@@ -20,18 +20,34 @@ import {
   AiExplanationMode,
   AuditAction,
   GeneratedSql,
+  LlmResultView,
+  maskPii,
+  SafeDatabaseConnection,
+  SchemaContext,
   SqlExplanation,
   SqlFix,
   SqlOptimization,
   sanitizeTechnical,
   VisualizationType,
 } from '@sqlpilot/shared';
-import { validateSql } from '@sqlpilot/sql-parser';
+import {
+  checkAgainstSchema,
+  describeIssues,
+  SchemaCheck,
+  SchemaIssue,
+  toParserDialect,
+  validateSql,
+} from '@sqlpilot/sql-parser';
 import { AuditService } from '../audit/audit.service';
 import { aiErrorToSafe } from '../common/errors/ai-errors';
 import { SchemaService } from '../schema/schema.service';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
 import { AI_PROVIDER } from './ai-provider.factory';
+
+export interface PreparedContext {
+  connection: SafeDatabaseConnection;
+  schemaContext: SchemaContext;
+}
 
 @Injectable()
 export class AiSqlService {
@@ -45,16 +61,29 @@ export class AiSqlService {
     private readonly config: ConfigService,
   ) {}
 
+  /**
+   * Loads the connection and the schema slice for a question. Independent of the follow-up
+   * classifier, so the caller runs the two at the same time instead of one after the other.
+   * `relatedText` (the previous question) widens table selection for follow-ups on large schemas.
+   */
+  async prepareContext(userId: string, connectionId: string, question: string, relatedText?: string): Promise<PreparedContext> {
+    const maxTables = this.config.get<number>('ai.maxSchemaTables') ?? 25;
+    const [connection, schemaContext] = await Promise.all([
+      this.connections.get(userId, connectionId),
+      this.schema.buildContext(userId, connectionId, relatedText ? `${relatedText} ${question}` : question, maxTables),
+    ]);
+    return { connection, schemaContext };
+  }
+
   async generate(
     userId: string,
     connectionId: string,
     question: string,
     history: Array<{ role: 'user' | 'assistant'; content: string }>,
     ctx: { requestId?: string | null; ip?: string | null },
+    prepared?: PreparedContext,
   ): Promise<GeneratedSql> {
-    const connection = await this.connections.get(userId, connectionId);
-    const maxTables = this.config.get<number>('ai.maxSchemaTables') ?? 25;
-    const schemaContext = await this.schema.buildContext(userId, connectionId, question, maxTables);
+    const { connection, schemaContext } = prepared ?? (await this.prepareContext(userId, connectionId, question));
 
     const messages = buildSqlGenerationMessages({ schema: schemaContext, question, history });
     const { data } = await this.call(() =>
@@ -99,6 +128,7 @@ export class AiSqlService {
       assumptions: data.assumptions,
       confidence: clamp01(data.confidence),
       warnings,
+      blockedByPolicy: validation && !validation.valid ? [...new Set(validation.violations.map((v) => v.code))] : null,
       unanswerable: data.unanswerable || Boolean(validation && !validation.valid),
       unanswerableReason:
         data.unanswerableReason ??
@@ -143,14 +173,44 @@ export class AiSqlService {
     };
   }
 
+  /**
+   * Checks the model's SQL against the real schema BEFORE it runs. No model call: this is a
+   * parse and a lookup. It never blocks on its own failure (no schema, unparseable SQL): in that
+   * case the database is left to decide.
+   */
+  async checkSql(userId: string, connectionId: string, sql: string, connection: SafeDatabaseConnection): Promise<SchemaCheck> {
+    try {
+      const snapshot = await this.schema.get(userId, connectionId);
+      return checkAgainstSchema(sql, snapshot, toParserDialect(connection.type), snapshot.databaseName);
+    } catch (error) {
+      this.logger.warn(`Schema check skipped: ${sanitizeTechnical(error)}`);
+      return { ok: true, issues: [], skipped: 'schema unavailable' };
+    }
+  }
+
+  /**
+   * Repairs a failing query. `problem` is either the database's error text, or the structured
+   * schema issues found before running it.
+   */
   async fix(
     userId: string,
     connectionId: string,
     sql: string,
-    databaseError: string,
+    problem: string | { issues: SchemaIssue[] },
   ): Promise<SqlFix> {
-    const schemaContext = await this.contextForSql(userId, connectionId, sql);
-    const messages = buildSqlFixMessages({ schema: schemaContext, sql, databaseError });
+    const structured = typeof problem === 'string' ? null : problem.issues;
+    // Table names the check suggested are added to the relevance text, so the repair prompt
+    // includes the tables it needs even when the original SQL named none of them.
+    const hints = structured
+      ? structured.flatMap((i) => (i.type === 'unknown_table' ? i.suggestions : [...i.suggestions, ...i.foundIn])).join(' ')
+      : '';
+    const schemaContext = await this.contextForSql(userId, connectionId, `${sql} ${hints}`);
+    // The error text can quote values from the user's data; contact details are masked before it leaves.
+    const messages = buildSqlFixMessages(
+      structured
+        ? { schema: schemaContext, sql, schemaProblems: describeIssues(structured) }
+        : { schema: schemaContext, sql, databaseError: maskPii(problem as string) },
+    );
     const { data } = await this.call(() =>
       this.ai.completeStructured({ messages, temperature: 0 }, sqlFixSchema, 'sql_fix'),
     );
@@ -169,12 +229,11 @@ export class AiSqlService {
    */
   async summarize(
     question: string,
-    columns: string[],
-    rows: Array<Record<string, unknown>>,
+    view: LlmResultView,
     scope: { returnedRows: number; totalRows: number | null; truncated: boolean },
   ): Promise<string | null> {
     try {
-      const messages = buildResultSummaryMessages({ question, columns, rows, ...scope });
+      const messages = buildResultSummaryMessages({ question, view, ...scope });
       const { data } = await this.ai.completeStructured(
         { messages, temperature: 0.2, model: this.fastModel() },
         resultAnswerSchema,
@@ -220,17 +279,30 @@ export class AiSqlService {
   }
 
   private async call<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (error) {
-      if (error instanceof AiProviderError) {
-        // The raw provider text (which can hold organisation ids, limits, model names) stays in
-        // the log, scrubbed. The caller gets a safe message and a coded, developer-safe detail.
-        this.logger.warn(`AI provider error [${error.code}${error.status ? ` ${error.status}` : ''}]: ${sanitizeTechnical(error.message)}`);
-        throw aiErrorToSafe(error);
+    // A model occasionally returns output that is not valid JSON or does not fit the schema. That is
+    // usually a one-off, so the call is retried once before the user is told anything.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (error instanceof AiProviderError && error.code === 'BAD_RESPONSE' && attempt === 0) {
+          this.logger.warn('The model returned an unusable response; retrying once.');
+          continue;
+        }
+        throw this.toSafe(error);
       }
-      throw error;
     }
+  }
+
+  /** Provider failures become a safe exception; anything else passes through unchanged. */
+  private toSafe(error: unknown): unknown {
+    if (error instanceof AiProviderError) {
+      // The raw provider text (which can hold organisation ids, limits, model names) stays in
+      // the log, scrubbed. The caller gets a safe message and a coded, developer-safe detail.
+      this.logger.warn(`AI provider error [${error.code}${error.status ? ` ${error.status}` : ''}]: ${sanitizeTechnical(error.message)}`);
+      return aiErrorToSafe(error);
+    }
+    return error;
   }
 }
 

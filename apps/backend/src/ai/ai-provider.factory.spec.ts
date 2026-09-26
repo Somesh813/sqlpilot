@@ -1,12 +1,14 @@
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../config/configuration';
 import { aiProviderFactory } from './ai-provider.factory';
+import { PrivacyGuardProvider } from './privacy-guard.provider';
 
 function configWith(ai: Partial<AppConfig['ai']>): ConfigService {
   const full: AppConfig['ai'] = {
     provider: 'openai',
     timeoutMs: 45_000,
     maxSchemaTables: 25,
+    sendRowValues: true,
     structuredOutputMode: 'json_schema',
     openai: { apiKey: '', model: 'gpt-4o', fastModel: 'gpt-4o-mini', baseUrl: undefined },
     groq: {
@@ -53,5 +55,12 @@ describe('aiProviderFactory', () => {
       }),
     );
     expect(provider.name).toBe('groq');
+  });
+
+  it('every real provider is wrapped in the privacy guard', () => {
+    const provider = aiProviderFactory(
+      configWith({ provider: 'openai', openai: { apiKey: 'sk-test', model: 'gpt-4o', fastModel: 'gpt-4o-mini', baseUrl: undefined } }),
+    );
+    expect(provider).toBeInstanceOf(PrivacyGuardProvider);
   });
 });
