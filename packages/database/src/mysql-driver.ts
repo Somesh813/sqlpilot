@@ -16,7 +16,11 @@ export class MysqlDriver implements SqlDriver {
       user: config.username,
       password: config.password,
       ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
-      connectionLimit: 4,
+      connectionLimit: config.pool?.max ?? 5,
+      maxIdle: Math.min(config.pool?.max ?? 5, 2),
+      idleTimeout: config.pool?.idleMs ?? 30_000,
+      queueLimit: 50, // waiting callers beyond this fail fast instead of piling up
+      enableKeepAlive: true,
       connectTimeout: 8000,
       dateStrings: true,
       multipleStatements: false,

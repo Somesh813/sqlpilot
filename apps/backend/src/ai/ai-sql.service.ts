@@ -20,6 +20,8 @@ import {
   AiExplanationMode,
   AuditAction,
   GeneratedSql,
+  SafeDatabaseConnection,
+  SchemaContext,
   SqlExplanation,
   SqlFix,
   SqlOptimization,
@@ -33,6 +35,11 @@ import { SchemaService } from '../schema/schema.service';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
 import { AI_PROVIDER } from './ai-provider.factory';
 
+export interface PreparedContext {
+  connection: SafeDatabaseConnection;
+  schemaContext: SchemaContext;
+}
+
 @Injectable()
 export class AiSqlService {
   private readonly logger = new Logger('AiSql');
@@ -45,16 +52,29 @@ export class AiSqlService {
     private readonly config: ConfigService,
   ) {}
 
+  /**
+   * Loads the connection and the schema slice for a question. Independent of the follow-up
+   * classifier, so the caller runs the two at the same time instead of one after the other.
+   * `relatedText` (the previous question) widens table selection for follow-ups on large schemas.
+   */
+  async prepareContext(userId: string, connectionId: string, question: string, relatedText?: string): Promise<PreparedContext> {
+    const maxTables = this.config.get<number>('ai.maxSchemaTables') ?? 25;
+    const [connection, schemaContext] = await Promise.all([
+      this.connections.get(userId, connectionId),
+      this.schema.buildContext(userId, connectionId, relatedText ? `${relatedText} ${question}` : question, maxTables),
+    ]);
+    return { connection, schemaContext };
+  }
+
   async generate(
     userId: string,
     connectionId: string,
     question: string,
     history: Array<{ role: 'user' | 'assistant'; content: string }>,
     ctx: { requestId?: string | null; ip?: string | null },
+    prepared?: PreparedContext,
   ): Promise<GeneratedSql> {
-    const connection = await this.connections.get(userId, connectionId);
-    const maxTables = this.config.get<number>('ai.maxSchemaTables') ?? 25;
-    const schemaContext = await this.schema.buildContext(userId, connectionId, question, maxTables);
+    const { connection, schemaContext } = prepared ?? (await this.prepareContext(userId, connectionId, question));
 
     const messages = buildSqlGenerationMessages({ schema: schemaContext, question, history });
     const { data } = await this.call(() =>

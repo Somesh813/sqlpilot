@@ -49,6 +49,14 @@ export interface AppConfig {
     /** Number of reverse-proxy hops to trust for the client IP (0 = none). */
     trustProxyHops: number;
   };
+  pool: {
+    /** Connections per external database. */
+    maxConnections: number;
+    /** A pool unused this long is closed (ms). */
+    idleMs: number;
+    /** Pools kept at once across all connections. */
+    maxDrivers: number;
+  };
   mail: {
     transport: 'smtp' | 'file' | 'none';
     smtpUrl: string;
@@ -111,6 +119,11 @@ export default (): AppConfig => ({
         ? process.env.DB_BLOCK_PRIVATE_HOSTS.toLowerCase() === 'true'
         : process.env.NODE_ENV === 'production',
     trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS ?? '0', 10),
+  },
+  pool: {
+    maxConnections: parseInt(process.env.DB_POOL_MAX_CONNECTIONS ?? '5', 10),
+    idleMs: parseInt(process.env.DB_POOL_IDLE_MS ?? '300000', 10),
+    maxDrivers: parseInt(process.env.DB_POOL_MAX_DRIVERS ?? '50', 10),
   },
   mail: {
     // Development defaults to a local outbox; production defaults to "none" and must opt in to SMTP.

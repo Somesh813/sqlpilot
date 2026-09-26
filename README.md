@@ -117,6 +117,7 @@ all-zero encryption keys, and MongoDB URLs without credentials.
 | `QUERY_TIMEOUT_MS` | | Per-query timeout (default `15000`) |
 | `QUERY_MAX_ROWS` | | Row cap (default `1000`) |
 | `ALLOW_WRITE_QUERIES` | | Global kill switch for writes in the SQL editor (default `false`) |
+| `DB_POOL_MAX_CONNECTIONS`, `DB_POOL_IDLE_MS`, `DB_POOL_MAX_DRIVERS` | | Persistent pool per database connection: size (default `5`), idle close time (default 5 min), pools kept (default `50`) |
 | `SQLITE_ALLOWED_DIRS` | | Comma-separated directories SQLite files must live in (default `./data/sqlite`) |
 | `DB_ALLOWED_HOSTS` | | Optional allowlist of database hosts: names, `*.suffix`, IPs, CIDRs |
 | `DB_BLOCK_PRIVATE_HOSTS` | | Refuse loopback, private and cloud-metadata addresses. Defaults to `true` in production |

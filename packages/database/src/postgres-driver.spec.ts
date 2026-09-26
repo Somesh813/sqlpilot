@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from 'pg';
 import { PostgresDriver } from './postgres-driver';
+import { DriverRegistry } from './registry';
 import { DriverConfig, RunQueryOptions } from './types';
 import { DatabaseType } from '@sqlpilot/shared';
 
@@ -243,5 +244,101 @@ describe('PostgresDriver: data fidelity', () => {
     expect(res.ok).toBe(true);
     expect(res.serverVersion).toMatch(/PostgreSQL/i);
     expect(res.warnings?.join(' ')).toMatch(/superuser/i);
+  });
+});
+
+describe('PostgresDriver through the registry: persistent pools (F14)', () => {
+  const appConnections = async () =>
+    Number(
+      (await admin.query("SELECT count(*)::int n FROM pg_stat_activity WHERE application_name = 'sqlpilot' AND datname = current_database()"))
+        .rows[0].n,
+    );
+  const pid = (registry: DriverRegistry, id = 'conn-1') =>
+    registry.run(id, cfg, async (d) => (await d.runQuery('SELECT pg_backend_pid() AS pid', READ)).rows[0].pid as number);
+
+  it('sequential requests reuse the same database connection instead of reconnecting', async () => {
+    const registry = new DriverRegistry({ sweepMs: 0 });
+    const first = await pid(registry);
+    const pids = new Set([first]);
+    for (let i = 0; i < 10; i++) pids.add(await pid(registry));
+    expect(pids.size).toBe(1);
+    await registry.closeAll();
+  });
+
+  it('the old per-request pattern opens a fresh connection every time (what this replaces)', async () => {
+    const pids = new Set<number>();
+    for (let i = 0; i < 4; i++) {
+      const d = new PostgresDriver(cfg);
+      pids.add((await d.runQuery('SELECT pg_backend_pid() AS pid', READ)).rows[0].pid as number);
+      await d.close();
+    }
+    expect(pids.size).toBeGreaterThan(1);
+  });
+
+  it('is faster than reconnecting for every request', async () => {
+    const registry = new DriverRegistry({ sweepMs: 0 });
+    await pid(registry); // warm the pool
+    const rounds = 15;
+    let t = Date.now();
+    for (let i = 0; i < rounds; i++) await pid(registry);
+    const pooled = Date.now() - t;
+    t = Date.now();
+    for (let i = 0; i < rounds; i++) {
+      const d = new PostgresDriver(cfg);
+      await d.runQuery('SELECT 1', READ);
+      await d.close();
+    }
+    const perRequest = Date.now() - t;
+    await registry.closeAll();
+    // eslint-disable-next-line no-console
+    console.log(`pooled ${(pooled / rounds).toFixed(1)} ms/query vs new pool each time ${(perRequest / rounds).toFixed(1)} ms/query`);
+    expect(pooled).toBeLessThan(perRequest);
+  });
+
+  it('respects the configured pool size under parallel load', async () => {
+    const baseline = await appConnections(); // the suite's own shared driver keeps a connection open
+    const registry = new DriverRegistry({ sweepMs: 0 });
+    const small: DriverConfig = { ...cfg, pool: { max: 3 } };
+    const pids = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        registry.run('conn-size', small, async (d) => (await d.runQuery('SELECT pg_backend_pid() AS pid, pg_sleep(0.05)', { ...READ, timeoutMs: 5000 }).catch(() => null)) !== null),
+      ),
+    );
+    expect(pids).toHaveLength(12);
+    expect((await appConnections()) - baseline).toBeLessThanOrEqual(3);
+    await registry.closeAll();
+  });
+
+  it('closing the registry releases every database connection', async () => {
+    const before = await appConnections();
+    const registry = new DriverRegistry({ sweepMs: 0 });
+    await Promise.all([pid(registry, 'a'), pid(registry, 'b')]);
+    expect(await appConnections()).toBeGreaterThan(before);
+    await registry.closeAll();
+    for (let i = 0; i < 20 && (await appConnections()) > before; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(await appConnections()).toBe(before);
+  });
+
+  it('idle eviction closes the pool and its connections', async () => {
+    const before = await appConnections();
+    let clock = Date.now();
+    const registry = new DriverRegistry({ sweepMs: 0, idleMs: 1000, now: () => clock });
+    await pid(registry);
+    clock += 5000;
+    expect(await registry.sweep()).toBe(1);
+    for (let i = 0; i < 20 && (await appConnections()) > before; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(await appConnections()).toBe(before);
+    await registry.closeAll();
+  });
+
+  it('survives the server killing an idle pooled connection (no crash, next query works)', async () => {
+    const registry = new DriverRegistry({ sweepMs: 0 });
+    const victim = await pid(registry);
+    await admin.query('SELECT pg_terminate_backend($1)', [victim]);
+    await new Promise((r) => setTimeout(r, 300));
+    const next = await registry.run('conn-1', cfg, (d) => d.runQuery('SELECT 42 AS answer', READ)).catch(() => null);
+    const retry = next ?? (await registry.run('conn-1', cfg, (d) => d.runQuery('SELECT 42 AS answer', READ)));
+    expect(retry.rows).toEqual([{ answer: 42 }]);
+    await registry.closeAll();
   });
 });

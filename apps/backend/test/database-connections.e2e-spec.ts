@@ -15,6 +15,7 @@ import { JwtAuthGuard } from '../src/auth/guards/jwt-auth.guard';
 import { CommonModule } from '../src/common/common.module';
 import configuration from '../src/config/configuration';
 import { DatabaseConnectionsModule } from '../src/database-connections/database-connections.module';
+import { DriverPoolService } from '../src/database-connections/driver-pool.service';
 import { UsersModule } from '../src/users/users.module';
 
 describe('Database connections (e2e)', () => {
@@ -161,7 +162,13 @@ describe('Database connections (e2e)', () => {
       .expect(200);
     expect(test.body.ok).toBe(true);
 
+    // F14: editing or deleting a connection drops its pooled connections (they hold the old credentials)
+    const invalidate = jest.spyOn(app.get(DriverPoolService), 'invalidate');
+    await request(app.getHttpServer()).patch(`/api/databases/${id}`).set(auth()).send({ name: 'renamed' }).expect(200);
+    expect(invalidate).toHaveBeenCalledWith(id);
+    invalidate.mockClear();
     await request(app.getHttpServer()).delete(`/api/databases/${id}`).set(auth()).expect(204);
+    expect(invalidate).toHaveBeenCalledWith(id);
     const after = await request(app.getHttpServer()).get('/api/databases').set(auth()).expect(200);
     expect(after.body).toHaveLength(0);
   });

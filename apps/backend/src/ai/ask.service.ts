@@ -62,14 +62,21 @@ export class AskService {
     // shown a previous query, the model tends to extend it (accumulating UNIONs across a chat).
     const recent = req.conversationId ? await this.conversations.recentTurns(userId, conversationId) : [];
     const previousQuestion = [...recent].reverse().find((t) => t.role === 'user')?.content;
-    const history =
-      previousQuestion && (await this.ai.isFollowUp(question, previousQuestion)) ? recent : [];
     const base = this.blank(question, conversationId);
+    const clock = timer();
 
     // ---- 1. understand the question → SQL ----
+    // The follow-up check (a model call) and loading the schema context (database reads) do not
+    // depend on each other, so they run together; generation waits for both.
     let generated: GeneratedSql;
     try {
-      generated = await this.ai.generate(userId, req.connectionId, question, history, ctx);
+      const [prepared, isFollowUp] = await Promise.all([
+        this.ai.prepareContext(userId, req.connectionId, question, previousQuestion),
+        previousQuestion ? this.ai.isFollowUp(question, previousQuestion) : Promise.resolve(false),
+      ]);
+      clock.mark('classify+context');
+      generated = await this.ai.generate(userId, req.connectionId, question, isFollowUp ? recent : [], ctx, prepared);
+      clock.mark('generate');
     } catch (error) {
       const detail = this.technical(error);
       this.logger.warn(`Generation failed [${ctx.requestId ?? '-'}]: ${detail}`);
@@ -135,10 +142,12 @@ export class AskService {
       );
     }
 
+    clock.mark('execute');
     // ---- 3. decide how to show it, then say it in words ----
     const columns = result.columns.map((c) => c.name);
     const analysis = this.analyze(columns, result.rows, generated);
     const answer = await this.answer(question, columns, result, analysis);
+    clock.mark('answer');
 
     const response: AskResponse = {
       ...base,
@@ -163,6 +172,8 @@ export class AskService {
     };
 
     await this.remember(userId, conversationId, question, response);
+    clock.mark('save');
+    this.logger.log(`Ask timings [${ctx.requestId ?? '-'}] ${clock.summary()}`);
     return response;
   }
 
@@ -320,4 +331,21 @@ export class AskService {
       error: null,
     };
   }
+}
+
+/** Per-stage wall-clock timings for one request, so slow steps are visible in the log. */
+function timer() {
+  const start = Date.now();
+  let last = start;
+  const stages: Array<[string, number]> = [];
+  return {
+    mark(stage: string) {
+      const now = Date.now();
+      stages.push([stage, now - last]);
+      last = now;
+    },
+    summary() {
+      return `${stages.map(([name, ms]) => `${name}=${ms}ms`).join(' ')} total=${Date.now() - start}ms`;
+    },
+  };
 }
