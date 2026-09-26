@@ -1,15 +1,18 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { withDriver } from '@sqlpilot/database';
+import { DatabaseDriverError, withDriver } from '@sqlpilot/database';
 import {
   AuditAction,
   ConnectionStatus,
   DatabaseSchemaSnapshot,
+  SAFE_MESSAGES,
+  sanitizeTechnical,
   SchemaContext,
   selectSchemaTables,
 } from '@sqlpilot/shared';
 import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
+import { SafeException } from '../common/errors/safe-exception';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
 import { SchemaSnapshot, SchemaSnapshotDocument } from './schemas/schema-snapshot.schema';
 
@@ -45,15 +48,23 @@ export class SchemaService {
     ctx: { requestId?: string | null; ip?: string | null },
   ): Promise<DatabaseSchemaSnapshot> {
     const connection = await this.connections.get(userId, connectionId);
-    const config = await this.connections.resolveDriverConfig(userId, connectionId);
+    let config;
+    try {
+      config = await this.connections.resolveDriverConfig(userId, connectionId);
+    } catch (error) {
+      if (error instanceof NotFoundException) throw error;
+      this.logger.warn(`Connection could not be prepared: ${sanitizeTechnical(error)}`);
+      throw new SafeException('DB_UNAVAILABLE', HttpStatus.SERVICE_UNAVAILABLE, error);
+    }
 
     let result;
     try {
       result = await withDriver(config, (driver) => driver.introspect());
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.connections.markStatus(connectionId, ConnectionStatus.ERROR, message);
-      throw new NotFoundException(`Could not read the schema: ${message}`);
+      const raw = error instanceof DatabaseDriverError ? error.driverError ?? error.message : error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Schema discovery failed: ${sanitizeTechnical(raw)}`);
+      await this.connections.markStatus(connectionId, ConnectionStatus.ERROR, SAFE_MESSAGES.DB_UNAVAILABLE);
+      throw new SafeException('DB_UNAVAILABLE', HttpStatus.SERVICE_UNAVAILABLE, raw);
     }
 
     const now = new Date();

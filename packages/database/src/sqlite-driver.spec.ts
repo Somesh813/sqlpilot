@@ -31,7 +31,8 @@ beforeAll(() => {
   driver = new SqliteDriver({ type: DatabaseType.SQLITE, database: 'test', filePath: file });
 });
 
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+// a just-killed query process can hold the file for a moment on Windows, so the cleanup retries
+afterAll(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
 const victims = () => {
   const db = new Database(file, { readonly: true });

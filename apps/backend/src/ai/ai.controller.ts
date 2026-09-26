@@ -7,6 +7,7 @@ import {
   SqlExplanation,
   SqlFix,
   SqlOptimization,
+  UserRole,
 } from '@sqlpilot/shared';
 import { Request } from 'express';
 import { AuthenticatedUser, CurrentUser } from '../common/decorators/current-user.decorator';
@@ -37,7 +38,7 @@ export class AiController {
     @Body() dto: AskDto,
     @Req() req: Request,
   ): Promise<AskResponse> {
-    return this.askService.ask(user.id, dto, ctx(req));
+    return this.askService.ask(user.id, dto, ctx(req), { isAdmin: user.role === UserRole.ADMIN });
   }
 
   @Post('generate-sql')

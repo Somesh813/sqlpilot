@@ -1,3 +1,4 @@
+import type { SafeErrorCode } from './safe-errors';
 import {
   AiExplanationMode,
   DatabaseType,
@@ -134,9 +135,14 @@ export interface AskRequest {
 export interface AskError {
   /** Where it failed: understanding the request, or running the query. */
   stage: 'generation' | 'execution';
-  /** Friendly, non-technical message for the user. */
+  /** Friendly, non-technical message for the user. Never contains provider, id, path or credential text. */
   message: string;
-  /** Raw database/AI error for the expandable debug section. */
+  /** Stable machine-readable reason, for the UI to pick an icon or a retry hint. */
+  code: SafeErrorCode | null;
+  /**
+   * Scrubbed one-line technical detail. Only present for administrators; always null for
+   * everyone else. Never contains stack traces, credentials, ids or paths.
+   */
   technical: string | null;
 }
 

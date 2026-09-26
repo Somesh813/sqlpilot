@@ -16,7 +16,7 @@ class DisabledAiProvider implements AiProvider {
   readonly name = 'disabled';
   constructor(private readonly reason: string) {}
   private fail(): never {
-    throw new AiProviderError(this.reason);
+    throw new AiProviderError(this.reason, undefined, false, 'NOT_CONFIGURED');
   }
   // `async` so the sync throw in fail() becomes a rejected promise, as the AiProvider contract implies.
   async complete(): Promise<AiCompletion> {

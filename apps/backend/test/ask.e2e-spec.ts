@@ -52,6 +52,8 @@ class ScriptedProvider implements AiProvider {
   /** Scripted follow-up classifier verdicts, consumed in order (default: not a follow-up). */
   followUps: boolean[] = [];
   classifierFails = false;
+  /** When set, the next SQL generation throws this (consumed once). */
+  generateError: unknown = null;
   calls: Array<{ name: string; messages: Array<{ role: string; content: string }> }> = [];
 
   async complete(): Promise<never> {
@@ -68,7 +70,14 @@ class ScriptedProvider implements AiProvider {
   ): Promise<AiStructuredResult<T>> {
     this.calls.push({ name, messages: request.messages });
     let data: unknown;
-    if (name === 'generated_sql') data = this.generated.shift();
+    if (name === 'generated_sql') {
+      if (this.generateError) {
+        const e = this.generateError;
+        this.generateError = null;
+        throw e;
+      }
+      data = this.generated.shift();
+    }
     else if (name === 'sql_fix') data = this.fixes.shift();
     else if (name === 'follow_up_check') {
       if (this.classifierFails) throw new Error('classifier down');
@@ -158,6 +167,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     provider.fixes = [];
     provider.calls = [];
     provider.answerFails = false;
+    provider.generateError = null;
     provider.followUps = [];
   });
 
@@ -276,8 +286,9 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     const res = await ask('List customer names').expect(200);
     expect(res.body.success).toBe(false);
     expect(res.body.error.stage).toBe('execution');
-    expect(res.body.error.message).toMatch(/could not be executed/i);
-    expect(res.body.error.technical).toMatch(/no such column/i);
+    expect(res.body.error.message).toMatch(/could not run the query/i);
+    expect(res.body.error.code).toBe('QUERY_FAILED');
+    expect(res.body.error.technical).toBeNull(); // technical detail is for administrators only
     expect(res.body.explanation).toBeTruthy();
   });
 
@@ -329,6 +340,117 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     const res = await ask('Customers in Atlantis').expect(200);
     expect(res.body.explanation).toBe('No matching records were found.');
     expect(provider.calls.slice(before).map((c) => c.name)).not.toContain('result_answer');
+  });
+
+  describe('F11/F12: failures are safe for users and never leak internals', () => {
+    const LEAKY_429 =
+      'groq request failed (429): 429 Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01abcXYZ789` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 7900. Please try again in 2.5s.';
+    const FORBIDDEN = /org_01abcXYZ789|groq|gpt-oss|on_demand|Limit 8000|tokens per minute|stack|\bat\s+\S+\s+\(|[A-Z]:\|\/home\/|\/etc\/|ECONN|password/i;
+
+    let adminToken: string;
+    let adminConnectionId: string;
+    const askAs = (t: string, cid: string, question: string) =>
+      request(app.getHttpServer()).post('/api/ai/ask').set({ Authorization: `Bearer ${t}` }).send({ connectionId: cid, question });
+
+    beforeAll(async () => {
+      const { MongoClient } = await import('mongodb');
+      await request(app.getHttpServer())
+        .post('/api/auth/register')
+        .send({ name: 'Admin', email: 'ask-admin@example.com', password: 'Password123' });
+      const client = await MongoClient.connect(mongo.getUri());
+      await client.db().collection('users').updateOne({ email: 'ask-admin@example.com' }, { $set: { role: 'ADMIN' } });
+      await client.close();
+      const login = await request(app.getHttpServer())
+        .post('/api/auth/login')
+        .send({ email: 'ask-admin@example.com', password: 'Password123' });
+      adminToken = login.body.accessToken;
+      const conn = await request(app.getHttpServer())
+        .post('/api/databases')
+        .set({ Authorization: `Bearer ${adminToken}` })
+        .send({ name: 'Shop', type: 'sqlite', database: 'shop', filePath: join(tmpDir, 'shop.sqlite') });
+      adminConnectionId = conn.body.id;
+    });
+
+    it('a provider rate limit becomes the friendly message: no org id, model, provider or limits', async () => {
+      const { AiProviderError } = await import('@sqlpilot/ai');
+      provider.generateError = new AiProviderError(LEAKY_429, undefined, true, 'RATE_LIMITED', 429);
+      const res = await ask('Show all customers').expect(200);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('AI_BUSY');
+      expect(res.body.error.message).toBe('AI service is temporarily busy. Please try again in a moment.');
+      expect(res.body.explanation).toBe(res.body.error.message);
+      expect(res.body.error.technical).toBeNull();
+      expect(JSON.stringify(res.body)).not.toMatch(FORBIDDEN);
+    });
+
+    it('administrators get a coded, scrubbed technical line: still no org id or provider text', async () => {
+      const { AiProviderError } = await import('@sqlpilot/ai');
+      provider.generateError = new AiProviderError(LEAKY_429, undefined, true, 'RATE_LIMITED', 429);
+      const res = await askAs(adminToken, adminConnectionId, 'Show all customers').expect(200);
+      expect(res.body.error.message).toBe('AI service is temporarily busy. Please try again in a moment.');
+      expect(res.body.error.technical).toBe('AI provider error: RATE_LIMITED (HTTP 429)');
+      expect(JSON.stringify(res.body)).not.toMatch(FORBIDDEN);
+    });
+
+    it.each([
+      ['TIMEOUT', 'AI_TIMEOUT', /took too long/],
+      ['UNAVAILABLE', 'AI_UNAVAILABLE', /temporarily unavailable/],
+      ['NOT_CONFIGURED', 'AI_NOT_CONFIGURED', /contact your administrator/],
+    ])('%s maps to %s', async (aiCode, safeCode, pattern) => {
+      const { AiProviderError } = await import('@sqlpilot/ai');
+      provider.generateError = new AiProviderError('401 Incorrect API key provided: gsk_live_abcdefghijklmnop1234', undefined, false, aiCode as never, 401);
+      const res = await ask('Show all customers').expect(200);
+      expect(res.body.error.code).toBe(safeCode);
+      expect(res.body.error.message).toMatch(pattern);
+      expect(JSON.stringify(res.body)).not.toMatch(/gsk_|API key|401/i);
+    });
+
+    it('an unreachable database says so plainly, does not try to "repair" the SQL, and leaks no path', async () => {
+      const path = join(tmpDir, 'vanishing.sqlite');
+      const db = new BetterSqlite3(path);
+      db.exec("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO customers (name) VALUES ('Ada')");
+      db.close();
+      const conn = await request(app.getHttpServer())
+        .post('/api/databases')
+        .set({ Authorization: `Bearer ${token}` })
+        .send({ name: 'Vanishing', type: 'sqlite', database: 'v', filePath: path })
+        .expect(201);
+      await request(app.getHttpServer()).get(`/api/databases/${conn.body.id}/schema`).set({ Authorization: `Bearer ${token}` }).expect(200);
+      rmSync(path); // the database goes away after its schema was cached
+
+      provider.generated = [gen('SELECT name FROM customers')];
+      provider.fixes = [{ fixedSql: 'SELECT name FROM customers', diagnosis: 'x', changes: [], confidence: 1 }];
+      const res = await askAs(token, conn.body.id, 'List customers').expect(200);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('DB_UNAVAILABLE');
+      expect(res.body.error.message).toBe('The database connection is unavailable. Please check the connection and try again.');
+      expect(res.body.error.technical).toBeNull();
+      expect(provider.calls.map((c) => c.name)).not.toContain('sql_fix');
+      expect(JSON.stringify(res.body)).not.toMatch(/vanishing|sqlpilot-ask|ENOENT|[A-Z]:\\|\/tmp\/|AppData/i);
+    });
+
+    it('the REST endpoints use the same wording for an unreachable database', async () => {
+      const list = await request(app.getHttpServer()).get('/api/databases').set({ Authorization: `Bearer ${token}` });
+      const vanishing = list.body.find((c: { name: string }) => c.name === 'Vanishing');
+      const res = await request(app.getHttpServer())
+        .post('/api/queries/execute')
+        .set({ Authorization: `Bearer ${token}` })
+        .send({ connectionId: vanishing.id, sql: 'SELECT 1', confirmed: true })
+        .expect(503);
+      expect(res.body.code).toBe('DB_UNAVAILABLE');
+      expect(res.body.message).toMatch(/connection is unavailable/);
+      expect(JSON.stringify(res.body)).not.toMatch(/vanishing|ENOENT|[A-Z]:\\|\/tmp\/|AppData/i);
+    });
+
+    it('a rejected statement in the SQL editor shows a scrubbed database message', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/api/queries/execute')
+        .set({ Authorization: `Bearer ${token}` })
+        .send({ connectionId, sql: 'SELECT nme FROM customers', confirmed: true })
+        .expect(422);
+      expect(res.body.code).toBe('QUERY_FAILED');
+      expect(res.body.databaseError).toMatch(/no such column/i);
+    });
   });
 
   it('question the schema cannot answer → clear message, no query run', async () => {

@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   AiProvider,
@@ -23,10 +23,12 @@ import {
   SqlExplanation,
   SqlFix,
   SqlOptimization,
+  sanitizeTechnical,
   VisualizationType,
 } from '@sqlpilot/shared';
 import { validateSql } from '@sqlpilot/sql-parser';
 import { AuditService } from '../audit/audit.service';
+import { aiErrorToSafe } from '../common/errors/ai-errors';
 import { SchemaService } from '../schema/schema.service';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
 import { AI_PROVIDER } from './ai-provider.factory';
@@ -222,8 +224,10 @@ export class AiSqlService {
       return await fn();
     } catch (error) {
       if (error instanceof AiProviderError) {
-        this.logger.warn(`AI provider error: ${error.message}`);
-        throw new ServiceUnavailableException(error.message);
+        // The raw provider text (which can hold organisation ids, limits, model names) stays in
+        // the log, scrubbed. The caller gets a safe message and a coded, developer-safe detail.
+        this.logger.warn(`AI provider error [${error.code}${error.status ? ` ${error.status}` : ''}]: ${sanitizeTechnical(error.message)}`);
+        throw aiErrorToSafe(error);
       }
       throw error;
     }

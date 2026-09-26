@@ -84,7 +84,7 @@ describe('AI endpoints without OPENAI_API_KEY configured (e2e)', () => {
       .set(auth())
       .send({ connectionId, question: 'top customers' })
       .expect(503);
-    expect(res.body.message).toMatch(/AI features are disabled/i);
+    expect(res.body.message).toMatch(/not available right now/i);
   });
 
   it('validates the request body before touching the AI provider', async () => {

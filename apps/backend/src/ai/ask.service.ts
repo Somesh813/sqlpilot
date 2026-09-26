@@ -3,7 +3,6 @@ import {
   HttpException,
   Injectable,
   Logger,
-  UnprocessableEntityException,
 } from '@nestjs/common';
 import {
   analyzeResult,
@@ -16,8 +15,12 @@ import {
   GeneratedSql,
   QueryResult,
   ResultAnalysis,
+  SAFE_MESSAGES,
+  SafeErrorCode,
+  sanitizeTechnical,
   VisualizationType,
 } from '@sqlpilot/shared';
+import { safeCodeOf, SafeException } from '../common/errors/safe-exception';
 import { ConversationsService } from '../conversations/conversations.service';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
 import { QueryExecutionService } from '../query-execution/query-execution.service';
@@ -27,9 +30,6 @@ interface RequestCtx {
   requestId?: string | null;
   ip?: string | null;
 }
-
-const NOT_UNDERSTOOD =
-  "Sorry, I couldn't understand that request. Try asking something like: “Show total sales by month.”";
 
 const TRY_ASKING = 'Try asking about the data in this database, for example: “Show total sales by month.”';
 
@@ -51,7 +51,7 @@ export class AskService {
     private readonly connections: DatabaseConnectionsService,
   ) {}
 
-  async ask(userId: string, req: AskRequest, ctx: RequestCtx): Promise<AskResponse> {
+  async ask(userId: string, req: AskRequest, ctx: RequestCtx, viewer: { isAdmin: boolean } = { isAdmin: false }): Promise<AskResponse> {
     // Ownership first: an unknown / foreign connection is a real 404, not a "couldn't understand" reply.
     await this.connections.get(userId, req.connectionId);
 
@@ -71,25 +71,30 @@ export class AskService {
     try {
       generated = await this.ai.generate(userId, req.connectionId, question, history, ctx);
     } catch (error) {
-      const technical = this.technical(error);
-      this.logger.warn(`Generation failed [${ctx.requestId ?? '-'}]: ${technical}`);
-      const message =
-        error instanceof HttpException && error.getStatus() === 503 ? technical : NOT_UNDERSTOOD;
-      return this.fail(userId, base, 'generation', message, technical);
+      const detail = this.technical(error);
+      this.logger.warn(`Generation failed [${ctx.requestId ?? '-'}]: ${detail}`);
+      const code: SafeErrorCode = safeCodeOf(error) ?? 'NOT_UNDERSTOOD';
+      return this.fail(userId, base, 'generation', code, viewer.isAdmin ? detail : null);
     }
 
     if (generated.unanswerable || !generated.sql.trim()) {
       const reason = generated.unanswerableReason?.trim();
       // Say why, then show what does work — a dead-end reply teaches a non-technical user nothing.
-      const message = reason ? `${reason} ${TRY_ASKING}` : NOT_UNDERSTOOD;
-      return this.fail(userId, { ...base, ...this.meta(generated) }, 'generation', message, null);
+      return this.fail(
+        userId,
+        { ...base, ...this.meta(generated) },
+        'generation',
+        'NOT_UNDERSTOOD',
+        null,
+        reason ? `${reason} ${TRY_ASKING}` : undefined,
+      );
     }
 
     // ---- 2. run it (one automatic repair attempt if the database rejects it) ----
     let sql = generated.sql;
     let autoFixed = false;
     let result: QueryResult | null = null;
-    let failure: { message: string; technical: string | null } | null = null;
+    let failure: { code: SafeErrorCode; detail: string } | null = null;
 
     for (let attempt = 0; attempt < 2 && !result; attempt++) {
       try {
@@ -100,28 +105,23 @@ export class AskService {
           ctx,
         );
       } catch (error) {
-        const technical = this.technical(error);
-        this.logger.warn(`Execution failed (attempt ${attempt + 1}) [${ctx.requestId ?? '-'}]: ${technical}`);
+        const detail = this.technical(error);
+        const code: SafeErrorCode =
+          error instanceof BadRequestException ? 'UNSAFE_QUERY' : (safeCodeOf(error) ?? 'QUERY_FAILED');
+        this.logger.warn(`Execution failed (attempt ${attempt + 1}) [${code}] [${ctx.requestId ?? '-'}]: ${detail}`);
+        failure = { code, detail };
 
-        if (error instanceof BadRequestException) {
-          failure = {
-            message: 'That request could not be run because it was not a safe, read-only question.',
-            technical,
-          };
-          break;
-        }
-        if (attempt === 0 && error instanceof UnprocessableEntityException) {
-          const repaired = await this.tryRepair(userId, req.connectionId, sql, technical);
+        // Only a rejected statement is worth repairing. An unreachable database, a timeout or a
+        // policy refusal will not be fixed by rewriting the SQL.
+        if (attempt === 0 && code === 'QUERY_FAILED') {
+          const repaired = await this.tryRepair(userId, req.connectionId, sql, detail);
           if (repaired) {
             sql = repaired;
             autoFixed = true;
             continue;
           }
         }
-        failure = {
-          message: 'Your request was understood, but the database query could not be executed.',
-          technical,
-        };
+        break;
       }
     }
 
@@ -130,8 +130,8 @@ export class AskService {
         userId,
         { ...base, ...this.meta(generated), sql },
         'execution',
-        failure?.message ?? NOT_UNDERSTOOD,
-        failure?.technical ?? null,
+        failure?.code ?? 'QUERY_FAILED',
+        viewer.isAdmin ? (failure?.detail ?? null) : null,
       );
     }
 
@@ -237,14 +237,16 @@ export class AskService {
     userId: string,
     base: AskResponse,
     stage: 'generation' | 'execution',
-    message: string,
+    code: SafeErrorCode,
     technical: string | null,
+    messageOverride?: string,
   ): Promise<AskResponse> {
+    const message = messageOverride ?? SAFE_MESSAGES[code];
     const response: AskResponse = {
       ...base,
       success: false,
       explanation: message,
-      error: { stage, message, technical },
+      error: { stage, message, code, technical },
     };
     if (base.conversationId) await this.remember(userId, base.conversationId, base.question, response);
     return response;
@@ -268,14 +270,16 @@ export class AskService {
     }
   }
 
+  /** One scrubbed line. Written to logs, and shown only to administrators. */
   private technical(error: unknown): string {
+    if (error instanceof SafeException) return error.detail || error.safeMessage;
     if (error instanceof HttpException) {
       const body = error.getResponse() as string | { databaseError?: string; message?: string | string[] };
-      if (typeof body === 'string') return body;
-      if (body.databaseError) return body.databaseError;
-      return Array.isArray(body.message) ? body.message.join(' ') : (body.message ?? error.message);
+      if (typeof body === 'string') return sanitizeTechnical(body);
+      if (body.databaseError) return sanitizeTechnical(body.databaseError);
+      return sanitizeTechnical(Array.isArray(body.message) ? body.message.join(' ') : (body.message ?? error.message));
     }
-    return error instanceof Error ? error.message : String(error);
+    return sanitizeTechnical(error);
   }
 
   private meta(g: GeneratedSql): Pick<AskResponse, 'assumptions' | 'warnings' | 'tablesUsed' | 'confidence' | 'queryExplanation'> {

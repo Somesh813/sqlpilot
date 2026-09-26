@@ -1,9 +1,10 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpStatus,
   Injectable,
+  NotFoundException,
   Logger,
-  UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DatabaseDriverError, withDriver } from '@sqlpilot/database';
@@ -11,11 +12,13 @@ import {
   AuditAction,
   QueryResult,
   QueryStatus,
+  sanitizeTechnical,
   SqlStatementKind,
   SqlValidationResult,
 } from '@sqlpilot/shared';
 import { validateSql } from '@sqlpilot/sql-parser';
 import { AuditService } from '../audit/audit.service';
+import { SafeException } from '../common/errors/safe-exception';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
 import { QueryHistoryService } from '../query-history/query-history.service';
 
@@ -87,7 +90,16 @@ export class QueryExecutionService {
       throw new ForbiddenException('Write queries are disabled for this connection.');
     }
 
-    const config = await this.connections.resolveDriverConfig(userId, connectionId);
+    let config;
+    try {
+      config = await this.connections.resolveDriverConfig(userId, connectionId);
+    } catch (error) {
+      if (error instanceof NotFoundException) throw error;
+      // A target the policy no longer allows, or credentials that cannot be read, is an
+      // unavailable database from the user's point of view. The reason stays in the log.
+      this.logger.warn(`Connection could not be prepared: ${sanitizeTechnical(error)}`);
+      throw new SafeException('DB_UNAVAILABLE', HttpStatus.SERVICE_UNAVAILABLE, error);
+    }
 
     try {
       const result = await withDriver(config, (driver) =>
@@ -123,14 +135,18 @@ export class QueryExecutionService {
 
       return { ...result, historyId: entry.id };
     } catch (error) {
-      const isTimeout = error instanceof DatabaseDriverError && error.code === 'TIMEOUT';
-      const driverMessage =
+      const driverCode = error instanceof DatabaseDriverError ? error.code : 'QUERY';
+      const isTimeout = driverCode === 'TIMEOUT';
+      const isUnavailable = driverCode === 'CONNECTION';
+      const raw =
         error instanceof DatabaseDriverError
           ? error.driverError ?? error.message
           : error instanceof Error
             ? error.message
             : String(error);
 
+      // Full text stays in the log and the history record (scrubbed); the response is safe.
+      this.logger.warn(`Query failed [${driverCode}]: ${sanitizeTechnical(raw)}`);
       await this.history.record({
         userId,
         connectionId,
@@ -139,15 +155,18 @@ export class QueryExecutionService {
         prompt: input.prompt ?? null,
         sql: validation.normalizedSql,
         status: isTimeout ? QueryStatus.TIMEOUT : QueryStatus.ERROR,
-        error: driverMessage,
+        error: sanitizeTechnical(raw),
         aiGenerated: input.aiGenerated ?? false,
       });
 
-      throw new UnprocessableEntityException({
-        error: 'QueryExecutionError',
+      if (isUnavailable) {
+        throw new SafeException('DB_UNAVAILABLE', HttpStatus.SERVICE_UNAVAILABLE, raw);
+      }
+      throw new SafeException(isTimeout ? 'DB_TIMEOUT' : 'QUERY_FAILED', HttpStatus.UNPROCESSABLE_ENTITY, raw, {
         status: isTimeout ? QueryStatus.TIMEOUT : QueryStatus.ERROR,
-        message: isTimeout ? 'The query timed out.' : 'The query failed to execute.',
-        databaseError: driverMessage,
+        // A rejected statement is about the user's own SQL (syntax, missing column), which the
+        // SQL editor needs to show. It is scrubbed; timeouts carry nothing further.
+        databaseError: isTimeout ? null : sanitizeTechnical(raw),
       });
     }
   }

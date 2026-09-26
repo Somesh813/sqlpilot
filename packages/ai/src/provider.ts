@@ -55,11 +55,18 @@ export interface AiProvider {
   streamComplete(request: AiCompletionRequest): AsyncIterable<string>;
 }
 
+/** What went wrong, without provider wording. The backend maps this to a user-safe message. */
+export type AiErrorCode = 'RATE_LIMITED' | 'TIMEOUT' | 'UNAVAILABLE' | 'NOT_CONFIGURED' | 'BAD_RESPONSE' | 'UNKNOWN';
+
 export class AiProviderError extends Error {
   constructor(
+    /** Internal detail for logs. Never show this to a user: it can carry ids and provider text. */
     message: string,
     readonly cause?: unknown,
     readonly retryable = false,
+    readonly code: AiErrorCode = 'UNKNOWN',
+    /** HTTP status returned by the provider, when there was one. */
+    readonly status?: number,
   ) {
     super(message);
     this.name = 'AiProviderError';

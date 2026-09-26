@@ -1,6 +1,7 @@
 import { DatabaseType, QueryResult, QueryStatus, TableSchema, TestConnectionResult } from '@sqlpilot/shared';
 import type { Connection as CallbackConnection } from 'mysql2';
 import * as mysql from 'mysql2/promise';
+import { toDriverError } from './errors';
 import { assertReadShaped, countSql, DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
 
 export class MysqlDriver implements SqlDriver {
@@ -145,12 +146,13 @@ export class MysqlDriver implements SqlDriver {
    * a huge table is never buffered. `multipleStatements` is off at the pool level.
    */
   async runQuery(sql: string, options: RunQueryOptions): Promise<QueryResult> {
-    const conn = await this.pool.getConnection();
     const start = Date.now();
     const timeoutMs = Math.max(1000, options.timeoutMs);
     let discard = false;
+    let conn: mysql.PoolConnection | null = null;
     try {
       if (!options.allowWrite) assertReadShaped(sql);
+      conn = await this.pool.getConnection();
       await conn.query(`SET SESSION MAX_EXECUTION_TIME = ${Math.trunc(timeoutMs)}`).catch(() => undefined);
       await conn.query(options.allowWrite ? 'START TRANSACTION' : 'START TRANSACTION READ ONLY');
 
@@ -194,10 +196,10 @@ export class MysqlDriver implements SqlDriver {
       };
     } catch (error) {
       discard = true;
-      throw toQueryError(error, Date.now() - start);
+      throw toDriverError(error, Date.now() - start);
     } finally {
-      if (discard) conn.destroy();
-      else conn.release();
+      if (discard) conn?.destroy();
+      else conn?.release();
     }
   }
 
@@ -288,12 +290,4 @@ function mysqlTypeName(code: number | undefined): string | null {
 
 function cleanError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function toQueryError(error: unknown, elapsed: number): DatabaseDriverError {
-  const message = cleanError(error);
-  if (/max_execution_time|query execution was interrupted|timeout/i.test(message)) {
-    return new DatabaseDriverError(`Query exceeded the time limit (${elapsed}ms).`, message, 'TIMEOUT');
-  }
-  return new DatabaseDriverError('Query execution failed.', message, 'QUERY');
 }

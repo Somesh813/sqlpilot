@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   AiCompletion,
   AiCompletionRequest,
+  AiErrorCode,
   AiProvider,
   AiProviderError,
   AiStructuredResult,
@@ -105,19 +106,22 @@ export class OpenAiProvider implements AiProvider {
         { signal: request.signal },
       );
       const raw = response.choices[0]?.message?.content ?? '';
-      if (!raw) throw new AiProviderError('Model returned an empty response.');
+      if (!raw) throw new AiProviderError('Model returned an empty response.', undefined, true, 'BAD_RESPONSE');
 
       let parsed: unknown;
       try {
         parsed = JSON.parse(raw);
       } catch {
-        throw new AiProviderError('Model response was not valid JSON.');
+        throw new AiProviderError('Model response was not valid JSON.', undefined, true, 'BAD_RESPONSE');
       }
 
       const validated = schema.safeParse(parsed);
       if (!validated.success) {
         throw new AiProviderError(
           `Model response did not match the ${schemaName} schema: ${validated.error.message}`,
+          undefined,
+          true,
+          'BAD_RESPONSE',
         );
       }
       return {
@@ -154,17 +158,24 @@ export class OpenAiProvider implements AiProvider {
   private wrap(error: unknown): AiProviderError {
     if (error instanceof AiProviderError) return error;
     if (error instanceof OpenAI.APIError) {
-      const retryable = error.status === 429 || (error.status ?? 0) >= 500;
-      return new AiProviderError(
-        `${this.name} request failed (${error.status}): ${error.message}`,
-        error,
-        retryable,
-      );
+      const status = error.status;
+      const retryable = status === 429 || (status ?? 0) >= 500;
+      const code: AiErrorCode =
+        status === 429
+          ? 'RATE_LIMITED'
+          : status === 401 || status === 403 || status === 404
+            ? 'NOT_CONFIGURED' // bad key, no access to the model, wrong model id: an operator problem
+            : status === 408 || status === 504 || (status === undefined && /time/i.test(error.message))
+              ? 'TIMEOUT'
+              : status === undefined || status >= 500
+                ? 'UNAVAILABLE' // no status means the connection itself failed
+                : 'UNKNOWN';
+      return new AiProviderError(`${this.name} request failed (${status}): ${error.message}`, error, retryable, code, status);
     }
-    if (error instanceof Error && error.name === 'AbortError') {
-      return new AiProviderError('The AI request timed out.', error, true);
+    if (error instanceof Error && (error.name === 'AbortError' || /timed? ?out/i.test(error.message))) {
+      return new AiProviderError('The AI request timed out.', error, true, 'TIMEOUT');
     }
-    return new AiProviderError('Unexpected AI provider error.', error);
+    return new AiProviderError('Unexpected AI provider error.', error, false, 'UNAVAILABLE');
   }
 }
 

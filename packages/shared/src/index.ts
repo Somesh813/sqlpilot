@@ -7,3 +7,4 @@ export * from './analysis';
 export * from './row-summary';
 export * from './schema-select';
 export * from './answer-facts';
+export * from './safe-errors';

@@ -1,6 +1,7 @@
 import { DatabaseType, QueryResult, QueryStatus, TableSchema, TestConnectionResult } from '@sqlpilot/shared';
 import { Pool, PoolClient } from 'pg';
 import Cursor from 'pg-cursor';
+import { toDriverError } from './errors';
 import { assertReadShaped, countSql, DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
 
 export class PostgresDriver implements SqlDriver {
@@ -192,12 +193,13 @@ export class PostgresDriver implements SqlDriver {
    * The extended protocol also refuses multi-statement strings.
    */
   async runQuery(sql: string, options: RunQueryOptions): Promise<QueryResult> {
-    const client = await this.pool.connect();
     const start = Date.now();
     const timeoutMs = Math.max(1000, options.timeoutMs);
     let destroy = false;
+    let client: PoolClient | null = null;
     try {
       if (!options.allowWrite) assertReadShaped(sql);
+      client = await this.pool.connect();
       await client.query(options.allowWrite ? 'BEGIN' : 'BEGIN READ ONLY');
       // Setting the timeouts through a SELECT takes the transaction's first snapshot. After that
       // PostgreSQL refuses `SET TRANSACTION READ WRITE`, so a read-only transaction cannot be
@@ -260,12 +262,12 @@ export class PostgresDriver implements SqlDriver {
         historyId: null,
       };
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => {
+      await client?.query('ROLLBACK').catch(() => {
         destroy = true; // the session is in an unknown state; do not return it to the pool
       });
-      throw toQueryError(error, Date.now() - start);
+      throw toDriverError(error, Date.now() - start);
     } finally {
-      client.release(destroy ? new Error('discarded after failed rollback') : undefined);
+      client?.release(destroy ? new Error('discarded after failed rollback') : undefined);
     }
   }
 
@@ -326,12 +328,4 @@ function pgTypeName(oid: number): string | null {
 
 function cleanError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function toQueryError(error: unknown, elapsed: number): DatabaseDriverError {
-  const message = cleanError(error);
-  if (/statement timeout|canceling statement due to statement timeout/i.test(message)) {
-    return new DatabaseDriverError(`Query exceeded the time limit (${elapsed}ms).`, message, 'TIMEOUT');
-  }
-  return new DatabaseDriverError('Query execution failed.', message, 'QUERY');
 }
