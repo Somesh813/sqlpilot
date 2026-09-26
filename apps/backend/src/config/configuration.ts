@@ -39,6 +39,24 @@ export interface AppConfig {
     defaultPageSize: number;
     allowWriteQueries: boolean;
   };
+  security: {
+    /** SQLite files must live under one of these directories. */
+    sqliteAllowedDirs: string[];
+    /** Host allowlist (names, *.suffix, IPs, CIDRs). Empty = no allowlist. */
+    dbAllowedHosts: string[];
+    /** With no allowlist: refuse loopback/private/metadata destinations. Default on in production. */
+    blockPrivateHosts: boolean;
+    /** Number of reverse-proxy hops to trust for the client IP (0 = none). */
+    trustProxyHops: number;
+  };
+  mail: {
+    transport: 'smtp' | 'file' | 'none';
+    smtpUrl: string;
+    from: string;
+    outboxDir: string;
+    /** Public URL of the web app, used to build links in emails. */
+    appBaseUrl: string;
+  };
   logLevel: string;
 }
 
@@ -78,6 +96,31 @@ export default (): AppConfig => ({
     maxRows: parseInt(process.env.QUERY_MAX_ROWS ?? String(DEFAULTS.QUERY_MAX_ROWS), 10),
     defaultPageSize: parseInt(process.env.QUERY_DEFAULT_PAGE_SIZE ?? String(DEFAULTS.QUERY_DEFAULT_PAGE_SIZE), 10),
     allowWriteQueries: (process.env.ALLOW_WRITE_QUERIES ?? 'false').toLowerCase() === 'true',
+  },
+  security: {
+    sqliteAllowedDirs: (process.env.SQLITE_ALLOWED_DIRS ?? './data/sqlite')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    dbAllowedHosts: (process.env.DB_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    blockPrivateHosts:
+      process.env.DB_BLOCK_PRIVATE_HOSTS !== undefined
+        ? process.env.DB_BLOCK_PRIVATE_HOSTS.toLowerCase() === 'true'
+        : process.env.NODE_ENV === 'production',
+    trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS ?? '0', 10),
+  },
+  mail: {
+    // Development defaults to a local outbox; production defaults to "none" and must opt in to SMTP.
+    transport:
+      (process.env.MAIL_TRANSPORT as 'smtp' | 'file' | 'none' | undefined) ??
+      (process.env.NODE_ENV === 'production' ? 'none' : 'file'),
+    smtpUrl: process.env.MAIL_SMTP_URL ?? '',
+    from: process.env.MAIL_FROM ?? 'SQLPilot <no-reply@localhost>',
+    outboxDir: process.env.MAIL_OUTBOX_DIR ?? './data/outbox',
+    appBaseUrl: process.env.APP_BASE_URL ?? (process.env.CORS_ORIGIN ?? 'http://localhost:4200').split(',')[0].trim(),
   },
   logLevel: process.env.LOG_LEVEL ?? 'info',
 });

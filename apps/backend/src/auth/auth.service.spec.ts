@@ -16,6 +16,7 @@ describe('AuthService', () => {
   };
   let tokens: { issueTokens: jest.Mock; consumeRefreshToken: jest.Mock; markRotated: jest.Mock; revoke: jest.Mock; revokeAllForUser: jest.Mock };
   let audit: { record: jest.Mock };
+  const mail = { sendPasswordReset: jest.fn().mockResolvedValue(undefined) };
   let service: AuthService;
 
   beforeEach(() => {
@@ -35,7 +36,7 @@ describe('AuthService', () => {
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     const config = { get: (k: string) => (k === 'env' ? 'test' : undefined) } as unknown as ConfigService;
-    service = new AuthService(users as never, tokens as never, config, audit as never);
+    service = new AuthService(users as never, tokens as never, config, audit as never, mail as never);
   });
 
   it('registers a user and returns tokens', async () => {

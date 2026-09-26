@@ -39,3 +39,6 @@ docker/data/
 *.sqlite
 *.sqlite3
 tmp/
+
+# local runtime data (dev mail outbox holds reset links; sqlite fixtures)
+data/

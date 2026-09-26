@@ -1,7 +1,19 @@
 import { DatabaseType, QueryResult, QueryStatus, TableSchema, TestConnectionResult } from '@sqlpilot/shared';
 import BetterSqlite3 from 'better-sqlite3';
+import { fork } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { assertReadShaped, countSql, DatabaseDriverError, DriverConfig, IntrospectionResult, RunQueryOptions, SqlDriver } from './types';
+
+const RUNNER = join(__dirname, '..', 'runner', 'sqlite-runner.js');
+
+interface RunnerMessage {
+  type: 'result' | 'total' | 'error';
+  result?: Omit<QueryResult, 'status' | 'historyId'>;
+  more?: boolean;
+  total?: number | null;
+  message?: string;
+}
 
 export class SqliteDriver implements SqlDriver {
   readonly type = DatabaseType.SQLITE;
@@ -15,7 +27,7 @@ export class SqliteDriver implements SqlDriver {
   private open(readonly: boolean): BetterSqlite3.Database {
     const path = this.config.filePath!;
     if (!existsSync(path)) {
-      throw new DatabaseDriverError(`SQLite database file not found: ${path}`, null, 'CONNECTION');
+      throw new DatabaseDriverError('The SQLite database file could not be opened.', 'file not found', 'CONNECTION');
     }
     return new BetterSqlite3(path, { readonly, fileMustExist: true, timeout: 8000 });
   }
@@ -109,88 +121,80 @@ export class SqliteDriver implements SqlDriver {
     }
   }
 
+  /**
+   * Runs the query in a separate process (see runner/sqlite-runner.js). The API's event loop
+   * stays free while it runs, and the process is killed on timeout or cancellation, which
+   * actually stops the work (a worker thread cannot interrupt a native SQLite call).
+   */
   async runQuery(sql: string, options: RunQueryOptions): Promise<QueryResult> {
-    const db = this.open(!options.allowWrite);
-    const start = Date.now();
-    // better-sqlite3 is synchronous and has no statement-interrupt API. The `timeout`
-    // option above bounds lock contention; a hard wall-clock guard is enforced after the
-    // fact so a pathological query still surfaces as a TIMEOUT to the caller.
-    const deadline = start + Math.max(1000, options.timeoutMs);
+    const path = this.config.filePath!;
+    if (!existsSync(path)) throw new DatabaseDriverError('The SQLite database file could not be opened.', 'file not found', 'CONNECTION');
+    if (!options.allowWrite) assertReadShaped(sql);
 
-    try {
-      // Read-only access is enforced by the file handle itself (opened `readonly`), plus
-      // query_only, which also refuses temp-table writes.
-      if (!options.allowWrite) {
-        assertReadShaped(sql);
-        db.pragma('query_only = ON');
-      }
-      const stmt = db.prepare(sql);
-      if (stmt.reader) {
-        // Pull at most maxRows + 1 rows; the extra one proves the result was cut off.
-        const names = stmt.columns().map((c) => c.name);
-        const rows: Array<Record<string, unknown>> = [];
-        let truncated = false;
-        for (const row of stmt.iterate() as IterableIterator<Record<string, unknown>>) {
-          if (rows.length >= options.maxRows) {
-            truncated = true;
-            break;
-          }
-          rows.push(pick(names, row));
-        }
-        if (Date.now() > deadline) {
-          throw new DatabaseDriverError(`Query exceeded the time limit (${Date.now() - start}ms).`, null, 'TIMEOUT');
-        }
-        let totalRows: number | null = truncated ? null : rows.length;
-        if (truncated && options.countTotal !== false && !options.allowWrite) {
-          try {
-            const total = db.prepare(countSql(sql)).get() as { total: number | bigint } | undefined;
-            totalRows = total ? Number(total.total) : null;
-          } catch {
-            totalRows = null;
-          }
-        }
-        return {
-          columns: stmt.columns().map((c) => ({ name: c.name, type: c.type ?? null })),
-          rows,
-          returnedRows: rows.length,
-          totalRows,
-          executionTimeMs: Date.now() - start,
-          truncated,
-          status: QueryStatus.SUCCESS,
-          historyId: null,
-        };
-      }
-      const info = stmt.run();
-      return {
-        columns: [{ name: 'changes', type: 'integer' }],
-        rows: [{ changes: info.changes }],
-        returnedRows: 1,
-        totalRows: 1,
-        executionTimeMs: Date.now() - start,
-        truncated: false,
-        status: QueryStatus.SUCCESS,
-        historyId: null,
+    const timeoutMs = Math.max(1000, options.timeoutMs);
+    const start = Date.now();
+
+    return new Promise<QueryResult>((resolve, reject) => {
+      const child = fork(RUNNER, [], {
+        execArgv: ['--max-old-space-size=384'],
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        serialization: 'json',
+      });
+      let settled = false;
+      let pending: QueryResult | null = null;
+      let countTimer: NodeJS.Timeout | undefined;
+
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(countTimer);
+        options.signal?.removeEventListener('abort', onAbort);
+        child.kill('SIGKILL');
+        fn();
       };
-    } catch (error) {
-      if (error instanceof DatabaseDriverError) throw error;
-      throw new DatabaseDriverError('Query execution failed.', cleanError(error), 'QUERY');
-    } finally {
-      db.close();
-    }
+      const fail = (error: DatabaseDriverError) => finish(() => reject(error));
+      const timer = setTimeout(
+        () => fail(new DatabaseDriverError(`Query exceeded the time limit (${Date.now() - start}ms).`, 'timeout', 'TIMEOUT')),
+        timeoutMs,
+      );
+      const onAbort = () => fail(new DatabaseDriverError('The query was cancelled.', 'cancelled', 'CANCELLED'));
+      if (options.signal?.aborted) return onAbort();
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+
+      child.on('message', (msg: RunnerMessage) => {
+        if (msg.type === 'error') return fail(new DatabaseDriverError('Query execution failed.', msg.message, 'QUERY'));
+        if (msg.type === 'result') {
+          pending = { ...msg.result!, status: QueryStatus.SUCCESS, historyId: null };
+          if (!msg.more) return finish(() => resolve(pending!));
+          // rows are in hand; give the exact count a short, separate budget
+          countTimer = setTimeout(() => finish(() => resolve(pending!)), Math.min(5000, timeoutMs));
+          return;
+        }
+        if (msg.type === 'total' && pending) {
+          pending.totalRows = msg.total ?? null;
+          finish(() => resolve(pending!));
+        }
+      });
+      child.on('error', (e) => fail(new DatabaseDriverError('Query execution failed.', e.message, 'QUERY')));
+      child.on('exit', (code) => {
+        if (!settled) fail(new DatabaseDriverError('Query execution failed.', `query process exited unexpectedly (${code})`, 'QUERY'));
+      });
+
+      child.send({
+        filePath: path,
+        sql,
+        maxRows: options.maxRows,
+        allowWrite: options.allowWrite,
+        countTotal: options.countTotal !== false,
+        countSql: countSql(sql),
+      });
+    });
   }
 
   async close(): Promise<void> {
     /* connections are opened per-operation */
   }
-}
-
-function pick(names: string[], row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const name of names) {
-    const v = row[name];
-    out[name] = typeof v === 'bigint' ? v.toString() : v instanceof Buffer ? v.toString('base64') : v;
-  }
-  return out;
 }
 
 function quoteIdent(name: string): string {

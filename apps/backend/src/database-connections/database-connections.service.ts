@@ -20,6 +20,12 @@ import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
 import { EncryptionService } from '../common/services/encryption.service';
 import {
+  assertHostAllowed,
+  assertSqlitePathAllowed,
+  ConnectionPolicy,
+  safeConnectionError,
+} from './connection-policy';
+import {
   DatabaseConnection,
   DatabaseConnectionDocument,
 } from './schemas/database-connection.schema';
@@ -72,6 +78,7 @@ export class DatabaseConnectionsService {
     ctx: { requestId?: string | null; ip?: string | null },
   ): Promise<SafeDatabaseConnection> {
     this.assertShape(input);
+    input = await this.assertTargetAllowed(input);
     const exists = await this.model.exists({
       userId: new Types.ObjectId(userId),
       name: input.name,
@@ -146,7 +153,9 @@ export class DatabaseConnectionsService {
           : null;
     }
 
-    this.assertShape(this.toInput(doc, nextCreds));
+    const checked = await this.assertTargetAllowed(this.toInput(doc, nextCreds));
+    this.assertShape(checked);
+    if (doc.type === DatabaseType.SQLITE) doc.filePath = checked.filePath ?? doc.filePath;
     doc.status = ConnectionStatus.DISCONNECTED;
     await doc.save();
 
@@ -182,6 +191,7 @@ export class DatabaseConnectionsService {
   /** Ad-hoc test for a not-yet-saved connection. */
   async testAdHoc(input: ConnectionInput): Promise<TestConnectionResult> {
     this.assertShape(input);
+    input = await this.assertTargetAllowed(input);
     return this.runTest(this.toDriverConfig(input, input));
   }
 
@@ -192,7 +202,7 @@ export class DatabaseConnectionsService {
     ctx: { requestId?: string | null; ip?: string | null },
   ): Promise<TestConnectionResult> {
     const doc = await this.getDocWithCredentials(userId, id);
-    const result = await this.runTest(this.resolveConfig(doc));
+    const result = await this.runTest(await this.checkedConfig(doc));
 
     doc.status = result.ok ? ConnectionStatus.CONNECTED : ConnectionStatus.ERROR;
     doc.lastError = result.error;
@@ -216,7 +226,7 @@ export class DatabaseConnectionsService {
    * over HTTP.
    */
   async resolveDriverConfig(userId: string, id: string): Promise<DriverConfig> {
-    return this.resolveConfig(await this.getDocWithCredentials(userId, id));
+    return this.checkedConfig(await this.getDocWithCredentials(userId, id));
   }
 
   async markStatus(id: string, status: ConnectionStatus, error: string | null): Promise<void> {
@@ -237,16 +247,43 @@ export class DatabaseConnectionsService {
 
   // ---------------------------------------------------------------------------
 
+  private policy(): ConnectionPolicy {
+    const sec = this.config.get<{ sqliteAllowedDirs: string[]; dbAllowedHosts: string[]; blockPrivateHosts: boolean }>('security');
+    return {
+      sqliteAllowedDirs: sec?.sqliteAllowedDirs ?? [],
+      allowedHosts: sec?.dbAllowedHosts ?? [],
+      blockPrivateHosts: sec?.blockPrivateHosts ?? true,
+    };
+  }
+
+  /** Enforced on create, update, test AND every use, so a stored or edited target cannot bypass it. */
+  private async assertTargetAllowed(input: ConnectionInput): Promise<ConnectionInput> {
+    if (input.type === DatabaseType.SQLITE) {
+      return { ...input, filePath: assertSqlitePathAllowed(input.filePath ?? '', this.policy()) };
+    }
+    await assertHostAllowed(input.host ?? '', this.policy());
+    return input;
+  }
+
+  private async checkedConfig(doc: DatabaseConnectionDocument): Promise<DriverConfig> {
+    const config = this.resolveConfig(doc);
+    if (config.type === DatabaseType.SQLITE) {
+      config.filePath = assertSqlitePathAllowed(config.filePath ?? '', this.policy());
+    } else {
+      await assertHostAllowed(config.host ?? '', this.policy());
+    }
+    return config;
+  }
+
   private async runTest(config: DriverConfig): Promise<TestConnectionResult> {
     try {
-      return await withDriver(config, (driver) => driver.testConnection());
+      const result = await withDriver(config, (driver) => driver.testConnection());
+      if (!result.ok) this.logger.warn(`Connection test failed: ${result.error}`);
+      return { ...result, error: safeConnectionError(result.error) };
     } catch (error) {
-      return {
-        ok: false,
-        latencyMs: null,
-        serverVersion: null,
-        error: error instanceof Error ? error.message : String(error),
-      };
+      const raw = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Connection test failed: ${raw}`);
+      return { ok: false, latencyMs: null, serverVersion: null, error: safeConnectionError(raw) };
     }
   }
 

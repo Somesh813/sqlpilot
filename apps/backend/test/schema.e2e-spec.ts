@@ -32,6 +32,7 @@ describe('Schema discovery (e2e)', () => {
     process.env.ENCRYPTION_KEY = 'b'.repeat(64);
 
     tmpDir = mkdtempSync(join(tmpdir(), 'sqlpilot-schema-'));
+    process.env.SQLITE_ALLOWED_DIRS = tmpDir;
     const sqlitePath = join(tmpDir, 'shop.sqlite');
     const db = new BetterSqlite3(sqlitePath);
     db.exec(`

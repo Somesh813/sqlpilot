@@ -44,7 +44,15 @@ import { UsersModule } from './users/users.module';
             config.get('env') !== 'production'
               ? { target: 'pino-pretty', options: { singleLine: true } }
               : undefined,
-          redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body.password'],
+          redact: [
+            'req.headers.authorization',
+            'req.headers.cookie',
+            'req.body.password',
+            'req.body.newPassword',
+            'req.body.currentPassword',
+            'req.body.token',
+            'req.body.refreshToken',
+          ],
           customProps: (req) => ({ requestId: (req as { id?: string }).id }),
         },
       }),

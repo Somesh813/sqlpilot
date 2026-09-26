@@ -6,6 +6,7 @@ import { json, urlencoded } from 'express';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import { applyProxySettings } from './proxy';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
@@ -13,6 +14,7 @@ async function bootstrap(): Promise<void> {
   const logger = app.get(Logger);
 
   app.useLogger(logger);
+  applyProxySettings(app, config.get<number>('security.trustProxyHops') ?? 0);
   app.use(helmet());
   // Query text can be large; everything else is small. 1 MB is a generous ceiling.
   app.use(json({ limit: '1mb' }));

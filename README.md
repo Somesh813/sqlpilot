@@ -159,6 +159,11 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | `QUERY_TIMEOUT_MS` | – | Per-query timeout (default `15000`) |
 | `QUERY_MAX_ROWS` | – | Max rows returned (default `1000`) |
 | `ALLOW_WRITE_QUERIES` | – | Global kill switch for write statements (default `false`) |
+| `SQLITE_ALLOWED_DIRS` | – | Comma-separated directories SQLite files must live in (default `./data/sqlite`) |
+| `DB_ALLOWED_HOSTS` | – | Optional host allowlist: names, `*.suffix`, IPs, CIDRs. Empty in production = private/loopback/metadata addresses are refused |
+| `TRUST_PROXY_HOPS` | – | Reverse proxies whose `X-Forwarded-For` entry is trusted (default `0`; `1` behind the bundled nginx) |
+| `MAIL_TRANSPORT` | – | `smtp`, `file` (dev outbox, refused in production) or `none` (production default) |
+| `MAIL_SMTP_URL` / `MAIL_FROM` / `APP_BASE_URL` | – | SMTP connection, sender, and public URL for emailed links |
 
 The API validates these on boot and refuses to start if a required value is missing or malformed.
 
@@ -166,8 +171,10 @@ The API validates these on boot and refuses to start if a required value is miss
 
 ```bash
 # 1. Start MongoDB. Either use a local install (DATABASE_URL=mongodb://localhost:27017/sqlpilot)
-#    or the bundled container (DATABASE_URL=mongodb://sqlpilot:sqlpilot@localhost:27017/sqlpilot?authSource=sqlpilot):
-docker compose up -d mongo
+#    or the bundled container, published on the host loopback only. Set MONGO_ROOT_PASSWORD and
+#    MONGO_APP_PASSWORD in .env first (there are no default passwords), then use
+#    DATABASE_URL=mongodb://sqlpilot:<MONGO_APP_PASSWORD>@localhost:27017/sqlpilot?authSource=sqlpilot
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mongo
 
 # 2. Backend  →  http://localhost:3000/api
 npm run dev:backend
@@ -179,13 +186,16 @@ npm run dev:frontend
 ## Docker
 
 ```bash
-cp .env.example .env    # fill in JWT_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY, and OPENAI_API_KEY or GROQ_API_KEY (+ AI_PROVIDER=groq)
+cp .env.example .env    # fill in JWT_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY, MONGO_ROOT_PASSWORD,
+                        # MONGO_APP_PASSWORD (openssl rand -hex 24), and OPENAI_API_KEY or GROQ_API_KEY
 docker compose up --build
 ```
 
-- Frontend: <http://localhost:8080>
-- API: <http://localhost:3000/api>
-- Mongo: `localhost:27017`
+- Web app and API (through nginx): <http://localhost:8080>. This is the only published port, bound to loopback; put a TLS proxy in front, or set `WEB_BIND=0.0.0.0` deliberately.
+- MongoDB and the API container are not reachable from the host.
+- Compose refuses to start while any secret is unset, and production start-up rejects placeholder or well-known credentials.
+- SQLite files go in the `sqlite-data` volume (`/app/data/sqlite`); other hosts must satisfy `DB_ALLOWED_HOSTS` / the private-network block.
+- Password reset emails need `MAIL_TRANSPORT=smtp` + `MAIL_SMTP_URL`; until then the feature is off and nothing sensitive is logged.
 
 ## API
 
@@ -199,7 +209,7 @@ Base path: `/api`. All routes require a `Bearer` access token except the ones ma
 | POST | `/auth/login` | ✅ | Returns tokens |
 | POST | `/auth/refresh` | ✅ | Rotate refresh token |
 | POST | `/auth/logout` | ✅ | Revoke a refresh token |
-| POST | `/auth/forgot-password` | ✅ | Issue reset token |
+| POST | `/auth/forgot-password` | ✅ | Email a reset link (same empty answer whether or not the account exists) |
 | POST | `/auth/reset-password` | ✅ | Reset with token |
 | GET | `/auth/profile` | | Current user |
 | POST | `/auth/change-password` | | Change password, revokes sessions |

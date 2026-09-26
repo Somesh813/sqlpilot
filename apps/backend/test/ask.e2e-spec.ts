@@ -98,6 +98,7 @@ describe('POST /ai/ask — natural language to real data (e2e)', () => {
     process.env.ENCRYPTION_KEY = '1'.repeat(64);
 
     tmpDir = mkdtempSync(join(tmpdir(), 'sqlpilot-ask-'));
+    process.env.SQLITE_ALLOWED_DIRS = tmpDir;
     const path = join(tmpDir, 'shop.sqlite');
     const db = new BetterSqlite3(path);
     db.exec(`

@@ -40,6 +40,30 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
     }
   }
 
+  if (isProd) {
+    const placeholder = /^(replace-with|changeme|change-me|secret|password|test|example)/i;
+    for (const key of ['JWT_SECRET', 'JWT_REFRESH_SECRET']) {
+      if (placeholder.test(String(config[key] ?? ''))) errors.push(`${key} is still a placeholder value`);
+    }
+    if (/^0+$/.test(encryptionKey)) errors.push('ENCRYPTION_KEY must not be all zeros');
+
+    const dbUrl = String(config.DATABASE_URL ?? '');
+    const creds = /^mongodb(?:\+srv)?:\/\/([^:@/]+):([^@/]*)@/.exec(dbUrl);
+    if (dbUrl && !creds) errors.push('DATABASE_URL must include credentials in production (MongoDB without auth is not allowed)');
+    if (creds && /^(root|admin|password|sqlpilot|mongo|changeme|123456)$/i.test(decodeURIComponent(creds[2]))) {
+      errors.push('DATABASE_URL uses a well-known password; set a strong random one');
+    }
+  }
+
+  const mailTransport = String(config.MAIL_TRANSPORT ?? (isProd ? 'none' : 'file'));
+  if (!['smtp', 'file', 'none'].includes(mailTransport)) errors.push('MAIL_TRANSPORT must be smtp, file or none');
+  if (isProd && mailTransport === 'file') {
+    errors.push('MAIL_TRANSPORT=file is a development outbox and is not allowed in production');
+  }
+  if (mailTransport === 'smtp' && !String(config.MAIL_SMTP_URL ?? '').trim()) {
+    errors.push('MAIL_SMTP_URL is required when MAIL_TRANSPORT=smtp');
+  }
+
   if (errors.length > 0) {
     throw new Error(`Invalid environment configuration:\n  - ${errors.join('\n  - ')}`);
   }

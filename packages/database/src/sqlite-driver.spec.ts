@@ -115,3 +115,79 @@ describe('SqliteDriver: data fidelity and editor writes', () => {
     expect(victims()).toBe(3);
   });
 });
+
+describe('SqliteDriver: heavy queries cannot freeze the API (F3)', () => {
+  // ~unbounded recursive count: seconds of pure CPU inside SQLite
+  const HEAVY = 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 500000000) SELECT count(*) FROM c';
+
+  /** Longest gap between two ticks of a 20ms timer = how long the event loop was frozen. */
+  const watchLoop = () => {
+    let last = Date.now();
+    let worst = 0;
+    const t = setInterval(() => {
+      const now = Date.now();
+      worst = Math.max(worst, now - last);
+      last = now;
+    }, 20);
+    return { stop: () => (clearInterval(t), worst) };
+  };
+
+  it('a heavy query times out on schedule, and the event loop stays responsive meanwhile', async () => {
+    const loop = watchLoop();
+    const started = Date.now();
+    await expect(driver.runQuery(HEAVY, { ...READ, timeoutMs: 1000 })).rejects.toMatchObject({ code: 'TIMEOUT' });
+    const elapsed = Date.now() - started;
+    const frozen = loop.stop();
+    expect(elapsed).toBeLessThan(2500); // before: a 1s timeout took ~7s
+    expect(frozen).toBeLessThan(250); // before: the loop was frozen for the whole query
+  });
+
+  it('a concurrent request finishes quickly while a heavy query is running', async () => {
+    const heavy = driver.runQuery(HEAVY, { ...READ, timeoutMs: 3000 }).catch((e) => e);
+    await new Promise((r) => setTimeout(r, 200));
+    const t = Date.now();
+    const quick = await driver.runQuery('SELECT count(*) AS n FROM victims', READ);
+    expect(quick.rows).toEqual([{ n: 3 }]);
+    expect(Date.now() - t).toBeLessThan(1500);
+    expect(await heavy).toMatchObject({ code: 'TIMEOUT' });
+  });
+
+  it('cancellation kills the query immediately', async () => {
+    const ac = new AbortController();
+    const started = Date.now();
+    const p = driver.runQuery(HEAVY, { ...READ, timeoutMs: 20_000, signal: ac.signal });
+    setTimeout(() => ac.abort(), 300);
+    await expect(p).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('an already-aborted signal never starts the query', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    await expect(driver.runQuery('SELECT 1', { ...READ, signal: ac.signal })).rejects.toMatchObject({ code: 'CANCELLED' });
+  });
+
+  it('the killed query process is really gone (no orphan burning CPU)', async () => {
+    const before = await countRunners();
+    await driver.runQuery(HEAVY, { ...READ, timeoutMs: 1000 }).catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(await countRunners()).toBeLessThanOrEqual(before);
+  });
+
+  it('many parallel queries do not block each other', async () => {
+    const results = await Promise.all(Array.from({ length: 8 }, () => driver.runQuery('SELECT n FROM nums LIMIT 5', READ)));
+    expect(results.every((r) => r.returnedRows === 5)).toBe(true);
+  });
+});
+
+async function countRunners(): Promise<number> {
+  const { execFile } = await import('node:child_process');
+  return new Promise((resolve) => {
+    const cmd = process.platform === 'win32' ? 'wmic' : 'pgrep';
+    const args = process.platform === 'win32' ? ['process', 'where', "commandline like '%sqlite-runner%'", 'get', 'processid'] : ['-fc', 'sqlite-runner'];
+    execFile(cmd, args, (_e, out) => {
+      const n = process.platform === 'win32' ? out.split('\n').filter((l) => /^\d+/.test(l.trim())).length : Number(out.trim() || 0);
+      resolve(n);
+    });
+  });
+}

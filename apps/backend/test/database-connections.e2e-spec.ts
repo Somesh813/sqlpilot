@@ -31,6 +31,7 @@ describe('Database connections (e2e)', () => {
     process.env.ENCRYPTION_KEY = 'a'.repeat(64);
 
     tmpDir = mkdtempSync(join(tmpdir(), 'sqlpilot-'));
+    process.env.SQLITE_ALLOWED_DIRS = tmpDir;
     sqlitePath = join(tmpDir, 'sample.sqlite');
     const db = new BetterSqlite3(sqlitePath);
     db.exec('CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');
@@ -85,9 +86,21 @@ describe('Database connections (e2e)', () => {
       .post('/api/databases/test')
       .set(auth())
       .send({ name: 'probe', type: 'sqlite', database: 'sample', filePath: join(tmpDir, 'nope.sqlite') })
-      .expect(200);
-    expect(bad.body.ok).toBe(false);
-    expect(bad.body.error).toBeTruthy();
+      .expect(400);
+    expect(bad.body.message).toMatch(/not available/);
+  });
+
+  it('F4: paths outside the approved directory look exactly like missing ones (no existence oracle)', async () => {
+    const send = (filePath: string) =>
+      request(app.getHttpServer())
+        .post('/api/databases/test')
+        .set(auth())
+        .send({ name: 'probe', type: 'sqlite', database: 'x', filePath });
+    const missing = await send(join(tmpDir, 'nope.sqlite')).expect(400);
+    for (const p of [process.execPath, '/etc/passwd', 'C:\Windows\win.ini', join(tmpDir, '..', 'x.sqlite')]) {
+      const res = await send(p).expect(400);
+      expect(res.body.message).toBe(missing.body.message);
+    }
   });
 
   it('creates a connection and never returns credentials', async () => {

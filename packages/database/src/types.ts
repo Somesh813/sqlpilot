@@ -37,6 +37,8 @@ export interface RunQueryOptions {
    * "Showing 1,000 of 1,500 rows". Best effort: null when it cannot be counted in time.
    */
   countTotal?: boolean;
+  /** Aborting stops the query (SQLite: the query process is killed). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -83,7 +85,7 @@ export class DatabaseDriverError extends Error {
   constructor(
     message: string,
     readonly driverError: string | null = null,
-    readonly code: 'CONNECTION' | 'QUERY' | 'TIMEOUT' | 'INTROSPECTION' = 'QUERY',
+    readonly code: 'CONNECTION' | 'QUERY' | 'TIMEOUT' | 'INTROSPECTION' | 'CANCELLED' = 'QUERY',
   ) {
     super(message);
     this.name = 'DatabaseDriverError';

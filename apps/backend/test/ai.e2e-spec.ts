@@ -33,6 +33,7 @@ describe('AI endpoints without OPENAI_API_KEY configured (e2e)', () => {
     delete process.env.OPENAI_API_KEY;
 
     tmpDir = mkdtempSync(join(tmpdir(), 'sqlpilot-ai-'));
+    process.env.SQLITE_ALLOWED_DIRS = tmpDir;
     const sqlitePath = join(tmpDir, 'shop.sqlite');
     const db = new BetterSqlite3(sqlitePath);
     db.exec('CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');

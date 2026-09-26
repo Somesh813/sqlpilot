@@ -4,6 +4,7 @@ import { AuditAction, AuthResponse } from '@sqlpilot/shared';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { AuditService } from '../audit/audit.service';
+import { MailService } from '../mail/mail.service';
 import { UserDocument } from '../users/schemas/user.schema';
 import { UsersService } from '../users/users.service';
 import { JwtPayload, RequestContext, TokensService, parseDuration } from './tokens.service';
@@ -19,6 +20,7 @@ export class AuthService {
     private readonly tokens: TokensService,
     private readonly config: ConfigService,
     private readonly audit: AuditService,
+    private readonly mail: MailService,
   ) {}
 
   async register(
@@ -89,20 +91,27 @@ export class AuthService {
   }
 
   /**
-   * Always returns without error, whether or not the email exists, to prevent
-   * account enumeration. The reset token is logged here; wiring a mail transport
-   * is the production integration point. Non-prod returns the token to ease testing.
+   * Always returns the same empty result, whether or not the email exists (no account
+   * enumeration), and sends the mail off the request path so response time does not reveal it
+   * either. The reset token is delivered ONLY inside the emailed link: it is never returned
+   * from the API and never written to a log.
    */
-  async forgotPassword(email: string): Promise<{ resetToken?: string }> {
+  async forgotPassword(email: string): Promise<void> {
     const user = await this.users.findByEmail(email);
-    if (!user) return {};
+    if (!user) return;
 
     const resetToken = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(resetToken).digest('hex');
     await this.users.setResetToken(user.id, tokenHash, new Date(Date.now() + parseDuration('1h')));
 
-    this.logger.warn(`Password reset for ${email}; token (send by email in production): ${resetToken}`);
-    return this.config.get('env') === 'production' ? {} : { resetToken };
+    // The token rides in the URL fragment, which browsers never send to servers or proxies.
+    const base = (this.config.get<string>('mail.appBaseUrl') ?? 'http://localhost:4200').replace(/\/+$/, '');
+    const link = `${base}/reset-password#token=${resetToken}`;
+    void this.mail.sendPasswordReset(user.email, link).catch((error) => {
+      this.logger.error(
+        `Could not send the password reset email: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+    });
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {

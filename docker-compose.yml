@@ -1,17 +1,27 @@
 name: sqlpilot
 
+# Production-shaped stack. Only the web container publishes a port; MongoDB and the API are
+# reachable only on internal Docker networks. Every secret comes from .env (see .env.example);
+# nothing here has a usable default password, and compose refuses to start if one is missing.
+#
+# Local development that needs MongoDB on the host: add docker-compose.dev.yml
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up mongo
+
 services:
   mongo:
     image: mongo:7
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: root
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-mongoadmin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in .env}
+      MONGO_APP_USER: ${MONGO_APP_USER:-sqlpilot}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:?set MONGO_APP_PASSWORD in .env}
     volumes:
       - mongo-data:/data/db
-      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
-    ports:
-      - '27017:27017'
+      - ./docker/mongo-init.sh:/docker-entrypoint-initdb.d/mongo-init.sh:ro
+    # No `ports:` on purpose. Nothing outside the compose network can reach the database.
+    networks: [data]
+    security_opt: ['no-new-privileges:true']
     healthcheck:
       test: ['CMD', 'mongosh', '--quiet', '--eval', "db.runCommand('ping').ok"]
       interval: 10s
@@ -29,17 +39,40 @@ services:
     environment:
       NODE_ENV: production
       PORT: '3000'
-      # Uses the dedicated app user created by docker/mongo-init.js (not the mongo root user).
-      DATABASE_URL: mongodb://sqlpilot:sqlpilot@mongo:27017/sqlpilot?authSource=sqlpilot
+      # The dedicated app user created by docker/mongo-init.sh, never the root user.
+      DATABASE_URL: mongodb://${MONGO_APP_USER:-sqlpilot}:${MONGO_APP_PASSWORD:?set MONGO_APP_PASSWORD in .env}@mongo:27017/sqlpilot?authSource=sqlpilot
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET in .env}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      OPENAI_MODEL_FAST: ${OPENAI_MODEL_FAST:-gpt-4o-mini}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+      GROQ_MODEL_FAST: ${GROQ_MODEL_FAST:-openai/gpt-oss-20b}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
       ALLOW_WRITE_QUERIES: ${ALLOW_WRITE_QUERIES:-false}
-    ports:
-      - '3000:3000'
+      # One reverse proxy (the bundled nginx) sits in front: trust exactly that hop for client IPs.
+      TRUST_PROXY_HOPS: '1'
+      # Where users may point SQLite connections, and which network hosts they may reach.
+      SQLITE_ALLOWED_DIRS: /app/data/sqlite
+      DB_ALLOWED_HOSTS: ${DB_ALLOWED_HOSTS:-}
+      DB_BLOCK_PRIVATE_HOSTS: ${DB_BLOCK_PRIVATE_HOSTS:-true}
+      # Password-reset email. "none" keeps the feature off until SMTP is configured.
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-none}
+      MAIL_SMTP_URL: ${MAIL_SMTP_URL:-}
+      MAIL_FROM: ${MAIL_FROM:-SQLPilot <no-reply@localhost>}
+    volumes:
+      - sqlite-data:/app/data/sqlite
+    # No `ports:` on purpose. The API is reached through nginx only, so rate limiting and the
+    # client-IP handling always apply.
+    networks: [data, web]
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
     healthcheck:
       test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/api/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -56,7 +89,17 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - '8080:80'
+      # Loopback by default. Put a TLS-terminating proxy in front, or set WEB_BIND=0.0.0.0 deliberately.
+      - '${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80'
+    networks: [web]
+    security_opt: ['no-new-privileges:true']
+
+networks:
+  # MongoDB <-> API only. `internal` blocks all outbound traffic from this network too.
+  data:
+    internal: true
+  web: {}
 
 volumes:
   mongo-data:
+  sqlite-data:

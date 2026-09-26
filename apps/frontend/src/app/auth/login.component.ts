@@ -45,7 +45,10 @@ import { AuthService } from '../core/services/auth.service';
       </button>
     </form>
 
-    <p class="mt-6 text-sm text-content-muted">
+    <p class="mt-4 text-sm">
+      <a routerLink="/forgot-password" class="text-content-muted hover:text-content-strong">Forgot your password?</a>
+    </p>
+    <p class="mt-2 text-sm text-content-muted">
       No account?
       <a routerLink="/register" class="font-medium text-brand-500 hover:text-brand-400">Create one</a>
     </p>

@@ -1,0 +1,8 @@
+# Development override: publishes MongoDB on the HOST LOOPBACK ONLY (never 0.0.0.0) so
+# `npm run dev:backend` can reach it. Credentials still come from .env.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mongo
+services:
+  mongo:
+    ports:
+      - '127.0.0.1:27017:27017'
+    networks: [data, default]

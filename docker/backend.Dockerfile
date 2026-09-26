@@ -28,6 +28,9 @@ COPY --from=build /repo/packages ./packages
 COPY --from=build /repo/apps/backend/dist ./dist
 COPY --from=build /repo/apps/backend/package.json ./package.json
 
+# Approved location for SQLite files (mounted as a volume by docker-compose)
+RUN mkdir -p /app/data/sqlite && chown -R node:node /app/data
+
 EXPOSE 3000
 USER node
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
