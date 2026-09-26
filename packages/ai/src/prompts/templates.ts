@@ -100,24 +100,30 @@ export function buildSqlOptimizationMessages(params: { schema: SchemaContext; sq
 export function buildSqlFixMessages(params: {
   schema: SchemaContext;
   sql: string;
-  databaseError: string;
+  /** The exact error the database returned. */
+  databaseError?: string;
+  /**
+   * Structured problems found BEFORE running the query: names that do not exist in the schema,
+   * with close matches and where a column actually lives.
+   */
+  schemaProblems?: string;
 }): AiMessage[] {
+  const problem = params.schemaProblems
+    ? `The query was NOT run. It refers to names that do not exist in the schema:\n${params.schemaProblems}`
+    : `Database error:\n${params.databaseError ?? '(none)'}`;
   return [
     {
       role: 'system',
       content: [
         "You are SQLPilot's SQL repair assistant.",
-        'You are given a failing SQL query and the exact database error it produced.',
-        'Diagnose the root cause and return a corrected, read-only query that uses ONLY tables/columns from the provided schema.',
-        'If the error indicates a missing column/table, find the correct name in the schema.',
-        'Do not change the intent of the query.',
+        'You are given a failing SQL query and what is wrong with it.',
+        'Diagnose the root cause and return a corrected, read-only query that uses O\nY tables/columns from the provided schema.',
+        'If a table or column is missing, find the correct name in the schema. If a column belongs to a table the query does not join, add the JOIN (follow the documented relationships, including intermediate tables).',
+        'Do not change the intent of the query. Never invent names that are not in the schema.',
       ].join('\n'),
     },
     { role: 'system', content: `Schema:\n\n${renderSchemaContext(params.schema)}` },
-    {
-      role: 'user',
-      content: `Failing SQL:\n\n${params.sql}\n\nDatabase error:\n${params.databaseError}`,
-    },
+    { role: 'user', content: `Failing SQL:\n\n${params.sql}\n\n${problem}` },
   ];
 }
 

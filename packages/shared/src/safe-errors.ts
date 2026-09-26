@@ -16,6 +16,7 @@ export type SafeErrorCode =
   | 'DB_TIMEOUT'
   | 'QUERY_FAILED'
   | 'UNSAFE_QUERY'
+  | 'SCHEMA_MISMATCH'
   | 'NOT_UNDERSTOOD'
   | 'RATE_LIMITED';
 
@@ -28,6 +29,7 @@ export const SAFE_MESSAGES: Record<SafeErrorCode, string> = {
   DB_UNAVAILABLE: 'The database connection is unavailable. Please check the connection and try again.',
   DB_TIMEOUT: 'The query took too long and was stopped. Try a narrower question, for example a shorter date range.',
   QUERY_FAILED: 'Your request was understood, but the database could not run the query.',
+  SCHEMA_MISMATCH: 'I could not match that request to the tables and columns in this database. Try rephrasing, or check that the data you are asking about exists.',
   UNSAFE_QUERY: 'That request could not be run because it was not a safe, read-only question.',
   NOT_UNDERSTOOD: 'Sorry, I could not understand that request. Try asking something like: \u201CShow total sales by month.\u201D',
   RATE_LIMITED: 'You are sending requests too quickly. Please wait a moment and try again.',

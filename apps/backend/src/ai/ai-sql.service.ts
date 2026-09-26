@@ -30,7 +30,14 @@ import {
   sanitizeTechnical,
   VisualizationType,
 } from '@sqlpilot/shared';
-import { validateSql } from '@sqlpilot/sql-parser';
+import {
+  checkAgainstSchema,
+  describeIssues,
+  SchemaCheck,
+  SchemaIssue,
+  toParserDialect,
+  validateSql,
+} from '@sqlpilot/sql-parser';
 import { AuditService } from '../audit/audit.service';
 import { aiErrorToSafe } from '../common/errors/ai-errors';
 import { SchemaService } from '../schema/schema.service';
@@ -165,15 +172,44 @@ export class AiSqlService {
     };
   }
 
+  /**
+   * Checks the model's SQL against the real schema BEFORE it runs. No model call: this is a
+   * parse and a lookup. It never blocks on its own failure (no schema, unparseable SQL): in that
+   * case the database is left to decide.
+   */
+  async checkSql(userId: string, connectionId: string, sql: string, connection: SafeDatabaseConnection): Promise<SchemaCheck> {
+    try {
+      const snapshot = await this.schema.get(userId, connectionId);
+      return checkAgainstSchema(sql, snapshot, toParserDialect(connection.type), snapshot.databaseName);
+    } catch (error) {
+      this.logger.warn(`Schema check skipped: ${sanitizeTechnical(error)}`);
+      return { ok: true, issues: [], skipped: 'schema unavailable' };
+    }
+  }
+
+  /**
+   * Repairs a failing query. `problem` is either the database's error text, or the structured
+   * schema issues found before running it.
+   */
   async fix(
     userId: string,
     connectionId: string,
     sql: string,
-    databaseError: string,
+    problem: string | { issues: SchemaIssue[] },
   ): Promise<SqlFix> {
-    const schemaContext = await this.contextForSql(userId, connectionId, sql);
+    const structured = typeof problem === 'string' ? null : problem.issues;
+    // Table names the check suggested are added to the relevance text, so the repair prompt
+    // includes the tables it needs even when the original SQL named none of them.
+    const hints = structured
+      ? structured.flatMap((i) => (i.type === 'unknown_table' ? i.suggestions : [...i.suggestions, ...i.foundIn])).join(' ')
+      : '';
+    const schemaContext = await this.contextForSql(userId, connectionId, `${sql} ${hints}`);
     // The error text can quote values from the user's data; contact details are masked before it leaves.
-    const messages = buildSqlFixMessages({ schema: schemaContext, sql, databaseError: maskPii(databaseError) });
+    const messages = buildSqlFixMessages(
+      structured
+        ? { schema: schemaContext, sql, schemaProblems: describeIssues(structured) }
+        : { schema: schemaContext, sql, databaseError: maskPii(problem as string) },
+    );
     const { data } = await this.call(() =>
       this.ai.completeStructured({ messages, temperature: 0 }, sqlFixSchema, 'sql_fix'),
     );

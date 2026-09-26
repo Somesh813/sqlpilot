@@ -17,11 +17,13 @@ import {
   minimizeResultForLlm,
   QueryResult,
   ResultAnalysis,
+  SafeDatabaseConnection,
   SAFE_MESSAGES,
   SafeErrorCode,
   sanitizeTechnical,
   VisualizationType,
 } from '@sqlpilot/shared';
+import { describeIssues, SchemaIssue } from '@sqlpilot/sql-parser';
 import { safeCodeOf, SafeException } from '../common/errors/safe-exception';
 import { ConversationsService } from '../conversations/conversations.service';
 import { DatabaseConnectionsService } from '../database-connections/database-connections.service';
@@ -32,6 +34,11 @@ interface RequestCtx {
   requestId?: string | null;
   ip?: string | null;
 }
+
+/** Repairs allowed per question, across schema problems and database errors together. */
+const MAX_REPAIRS = 2;
+
+const normalizeSql = (sql: string) => sql.replace(/\s+/g, ' ').replace(/;\s*$/, '').trim().toLowerCase();
 
 const TRY_ASKING = 'Try asking about the data in this database, for example: “Show total sales by month.”';
 
@@ -72,11 +79,13 @@ export class AskService {
     // The follow-up check (a model call) and loading the schema context (database reads) do not
     // depend on each other, so they run together; generation waits for both.
     let generated: GeneratedSql;
+    let connection: SafeDatabaseConnection;
     try {
       const [prepared, isFollowUp] = await Promise.all([
         this.ai.prepareContext(userId, req.connectionId, question, previousQuestion),
         previousQuestion ? this.ai.isFollowUp(question, previousQuestion) : Promise.resolve(false),
       ]);
+      connection = prepared.connection;
       clock.mark('classify+context');
       generated = await this.ai.generate(userId, req.connectionId, question, isFollowUp ? recent : [], ctx, prepared);
       clock.mark('generate');
@@ -100,13 +109,38 @@ export class AskService {
       );
     }
 
-    // ---- 2. run it (one automatic repair attempt if the database rejects it) ----
+    // ---- 2. check it against the schema, run it, and repair it a limited number of times ----
+    // Two kinds of problem are repairable: names that do not exist in the schema (found BEFORE the
+    // query runs) and a statement the database rejects. Both draw on ONE budget, and a repair that
+    // returns SQL we have already tried ends the loop, so it can never spin.
     let sql = generated.sql;
     let autoFixed = false;
+    let repairs = 0;
+    const tried = new Set([normalizeSql(sql)]);
     let result: QueryResult | null = null;
     let failure: { code: SafeErrorCode; detail: string } | null = null;
 
-    for (let attempt = 0; attempt < 2 && !result; attempt++) {
+    const repair = async (problem: string | { issues: SchemaIssue[] }): Promise<boolean> => {
+      if (repairs >= MAX_REPAIRS) return false;
+      repairs++;
+      const fixed = await this.tryRepair(userId, req.connectionId, sql, problem);
+      if (!fixed || tried.has(normalizeSql(fixed))) return false; // no progress
+      tried.add(normalizeSql(fixed));
+      sql = fixed;
+      autoFixed = true;
+      return true;
+    };
+
+    for (;;) {
+      const check = await this.ai.checkSql(userId, req.connectionId, sql, connection);
+      if (!check.ok) {
+        const detail = describeIssues(check.issues).replace(/\n/g, ' ');
+        this.logger.warn(`Schema check failed (repairs so far ${repairs}) [${ctx.requestId ?? '-'}]: ${sanitizeTechnical(detail)}`);
+        failure = { code: 'SCHEMA_MISMATCH', detail };
+        if (await repair({ issues: check.issues })) continue;
+        break;
+      }
+
       try {
         result = await this.queries.execute(
           userId,
@@ -114,23 +148,17 @@ export class AskService {
           { sql, confirmed: true, forceReadOnly: true, prompt: question, conversationId, aiGenerated: true },
           ctx,
         );
+        failure = null;
+        break;
       } catch (error) {
         const detail = this.technical(error);
         const code: SafeErrorCode =
           error instanceof BadRequestException ? 'UNSAFE_QUERY' : (safeCodeOf(error) ?? 'QUERY_FAILED');
-        this.logger.warn(`Execution failed (attempt ${attempt + 1}) [${code}] [${ctx.requestId ?? '-'}]: ${detail}`);
+        this.logger.warn(`Execution failed (repairs so far ${repairs}) [${code}] [${ctx.requestId ?? '-'}]: ${detail}`);
         failure = { code, detail };
-
         // Only a rejected statement is worth repairing. An unreachable database, a timeout or a
         // policy refusal will not be fixed by rewriting the SQL.
-        if (attempt === 0 && code === 'QUERY_FAILED') {
-          const repaired = await this.tryRepair(userId, req.connectionId, sql, detail);
-          if (repaired) {
-            sql = repaired;
-            autoFixed = true;
-            continue;
-          }
-        }
+        if (code === 'QUERY_FAILED' && (await repair(detail))) continue;
         break;
       }
     }
@@ -201,9 +229,9 @@ export class AskService {
     }
   }
 
-  private async tryRepair(userId: string, connectionId: string, sql: string, dbError: string): Promise<string | null> {
+  private async tryRepair(userId: string, connectionId: string, sql: string, problem: string | { issues: SchemaIssue[] }): Promise<string | null> {
     try {
-      const fix = await this.ai.fix(userId, connectionId, sql, dbError);
+      const fix = await this.ai.fix(userId, connectionId, sql, problem);
       const fixed = fix.fixedSql?.trim();
       return fixed && fixed !== sql.trim() ? fixed : null;
     } catch (error) {

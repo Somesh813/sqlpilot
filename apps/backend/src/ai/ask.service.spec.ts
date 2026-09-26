@@ -97,6 +97,7 @@ describe('AskService: what the answer model is sent (F15)', () => {
     const ai = {
       prepareContext: jest.fn().mockResolvedValue({ connection: {}, schemaContext: {} }),
       isFollowUp: jest.fn().mockResolvedValue(false),
+      checkSql: jest.fn().mockResolvedValue({ ok: true, issues: [], skipped: null }),
       generate: jest.fn().mockResolvedValue({
         unanswerable: false, sql: 'SELECT * FROM customers', explanation: '', assumptions: [], warnings: [], tablesUsed: [], confidence: 1,
         visualization: { recommended: false, type: 'table', xField: null, yField: null },
