@@ -270,3 +270,26 @@ Please never commit `.env` or real credentials.
 ## License
 
 [MIT](./LICENSE)
+
+## Cloud and MLOps Lab: Project Summary
+
+### About the Project
+
+SQLPilot lets people ask questions about a database in plain English. It turns each question
+into a validated, read-only SQL query, runs it on PostgreSQL, MySQL or SQLite, and answers with
+the real rows, a chart when one fits, and a short explanation checked against the data.
+
+### Objectives
+
+- Let users who do not write SQL get answers from their own databases.
+- Keep every AI-generated query safe: parsed, validated and run inside a read-only transaction.
+- Verify the written answer against the actual query result before it is shown.
+- Apply version control and CI practices using Git, GitHub and GitHub Actions.
+
+### Technologies Used
+
+- Angular 18 (frontend), NestJS 10 on Node.js 20 (backend)
+- PostgreSQL, MySQL and SQLite
+- OpenAI and Groq language model APIs
+- Docker and Docker Compose
+- Git, GitHub and GitHub Actions
