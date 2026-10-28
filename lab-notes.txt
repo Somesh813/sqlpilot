@@ -1,2 +1,3 @@
 Git Lab Experiment
 This file is created to practise Git operations.
+CI test: this line is added to trigger the GitHub Actions workflow automatically.
