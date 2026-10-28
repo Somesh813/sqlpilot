@@ -1,0 +1,17 @@
+name: Basic CI Workflow
+
+on: [push, pull_request]
+
+jobs:
+  basic-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Display success message
+        run: echo "GitHub Actions is working successfully."
+
+      - name: List project files
+        run: ls -la
